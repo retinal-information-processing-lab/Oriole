@@ -50,3 +50,13 @@ def test_config_keeps_calibrations_and_reads_legacy_aule(tmp_path, monkeypatch):
     cfg = config_mod.Config.load()                        # old keys are ignored
     assert cfg.dmd_height == 768 and cfg.last_dir == "D:/data" and cfg.path == str(new)
     assert not hasattr(cfg, "rig_id") and not hasattr(cfg, "wfd_profile_prefix")
+
+
+def test_config_wavefront_folders_from_one_root():
+    from pathlib import Path
+    from oriole.config import Config
+    cfg = Config(wfd_root=r"E:\wfdIV_20261022")
+    assert Path(cfg.wfd_script_dir) == Path(r"E:\wfdIV_20261022\script")
+    assert Path(cfg.wfd_output_dir) == Path(r"E:\wfdIV_20261022\GeneratedPhasemasks")
+    old = Config.from_dict({"wfd_script_dir": r"D:\wfd\script", "wfd_output_dir": r"D:\wfd\GeneratedPhasemasks"})
+    assert Path(old.wfd_root) == Path(r"D:\wfd") and "wfd_script_dir" not in old.to_dict()

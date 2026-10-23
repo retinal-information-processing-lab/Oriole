@@ -27,7 +27,7 @@ The shutter needs `nidaqmx` and the NI-DAQmx driver; without them Oriole runs an
 ```
  VISUAL · DMD          image                                  HOLO · SLM
  Settings              Load image…  Spot Ø  Undo  Clear       Settings
-  DMD rows / columns                                           script / phase mask folders
+  DMD rows / columns                                           Wavefront folder, 🧹 sweeps
   pixel size            left click: add a spot                 shutter device + output
  Calibration            right click on a spot: remove it      Calibration
   X  Y  rotation        (spots are numbered 1..N)              X  Y  rotation
@@ -72,8 +72,10 @@ folder)* selected): one mask per spot, saved by Wavefront as `Pattern1_000.algoP
   auto load option); after 2 minutes Oriole gives up.
 * `Pattern_spots.json` next to the masks says which spot each mask is.
 
-**🧹** next to each holo folder sweeps it clean: the script folder at once, the phase mask folder
-after a confirmation (it lists how many files and their dates).
+**Wavefront folder** (holo *Settings*, `E:\wfdIV_20261022` by default): the scripts go to its
+`script\` and the masks are read from its `GeneratedPhasemasks\`. **🧹 script** sweeps the
+script folder clean at once, **🧹 phase masks** the mask folder after a confirmation (it lists
+how many files and their dates).
 
 **Manual**: pick a mask number (the `Pattern<n>` found in the phase mask folder) and *Load* it
 onto the SLM (the script folder is emptied first, and the same 10 s check applies). *Open* /

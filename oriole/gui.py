@@ -166,10 +166,9 @@ class ImageView(pg.GraphicsLayoutWidget):
 
 
 class FolderEdit(QtWidgets.QWidget):
-    """Folder path (typed or picked with …) and a broom to empty it; ``changed`` when it is edited."""
+    """Folder path (typed or picked with …); ``changed`` when it is edited."""
 
     changed = QtCore.pyqtSignal(str)
-    purgeRequested = QtCore.pyqtSignal()
 
     def __init__(self, value: str, parent=None):
         super().__init__(parent)
@@ -182,14 +181,8 @@ class FolderEdit(QtWidgets.QWidget):
         btn.setFixedWidth(30)
         btn.setStyleSheet("padding: 4px 0;")
         btn.clicked.connect(self._browse)
-        self.btn_purge = QtWidgets.QPushButton("🧹")
-        self.btn_purge.setFixedWidth(30)
-        self.btn_purge.setStyleSheet("padding: 2px 0; font: 12pt 'Segoe UI Emoji';")
-        self.btn_purge.setToolTip("Sweep this folder clean (deletes its files)")
-        self.btn_purge.clicked.connect(self.purgeRequested)
         row.addWidget(self.edit, stretch=1)
         row.addWidget(btn)
-        row.addWidget(self.btn_purge)
 
     def _browse(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Folder", self.edit.text())
@@ -303,16 +296,22 @@ class MainWindow(QtWidgets.QMainWindow):
         right.addWidget(_title("HOLO · SLM"))
         setup = QtWidgets.QGroupBox("Settings")
         col = QtWidgets.QVBoxLayout(setup)
-        col.addWidget(QtWidgets.QLabel("script folder"))
-        self.edit_script_dir = FolderEdit(self.config.wfd_script_dir)
-        self.edit_script_dir.changed.connect(self._on_wavefront_dirs)
-        self.edit_script_dir.purgeRequested.connect(self.sweep_script_folder)
-        col.addWidget(self.edit_script_dir)
-        col.addWidget(QtWidgets.QLabel("phase mask folder"))
-        self.edit_output_dir = FolderEdit(self.config.wfd_output_dir)
-        self.edit_output_dir.changed.connect(self._on_wavefront_dirs)
-        self.edit_output_dir.purgeRequested.connect(self.sweep_mask_folder)
-        col.addWidget(self.edit_output_dir)
+        col.addWidget(QtWidgets.QLabel("Wavefront folder"))
+        self.edit_wfd_root = FolderEdit(self.config.wfd_root)
+        self.edit_wfd_root.setToolTip("holds script\\ and GeneratedPhasemasks\\")
+        self.edit_wfd_root.changed.connect(self._on_wavefront_root)
+        col.addWidget(self.edit_wfd_root)
+        sweep = QtWidgets.QHBoxLayout()
+        self.btn_sweep_scripts = QtWidgets.QPushButton("🧹 script")
+        self.btn_sweep_scripts.setToolTip("Sweep script\\ clean")
+        self.btn_sweep_scripts.clicked.connect(self.sweep_script_folder)
+        self.btn_sweep_masks = QtWidgets.QPushButton("🧹 phase masks")
+        self.btn_sweep_masks.setToolTip("Sweep GeneratedPhasemasks\\ clean (asks first)")
+        self.btn_sweep_masks.clicked.connect(self.sweep_mask_folder)
+        for b in (self.btn_sweep_scripts, self.btn_sweep_masks):
+            b.setStyleSheet("padding: 4px 6px;")
+            sweep.addWidget(b)
+        col.addLayout(sweep)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("shutter"))
         self.edit_device = QtWidgets.QLineEdit(self.config.nidaq_device)
@@ -730,9 +729,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config.pixel_size_um = self.spin_dmd_px.value()
         self.save_config()
 
-    def _on_wavefront_dirs(self, *_):
-        self.config.wfd_script_dir = self.edit_script_dir.edit.text()
-        self.config.wfd_output_dir = self.edit_output_dir.edit.text()
+    def _on_wavefront_root(self, root: str):
+        self.config.wfd_root = root
         self.save_config()
         for d in (self.config.wfd_script_dir, self.config.wfd_output_dir):
             if not Path(d).is_dir():

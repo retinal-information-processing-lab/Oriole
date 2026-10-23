@@ -22,8 +22,7 @@ class Config:
     holo_cal: dict = field(default_factory=HOLO_DEFAULT.to_dict)       # camera -> Wavefront µm
     last_dir: str = ""             # last directory used in file dialogs
     linked_bin: str = ""           # last bin the spot bin was merged into
-    wfd_script_dir: str = r"E:\wfdIV_20261022\script"                  # folder Wavefront IV watches
-    wfd_output_dir: str = r"E:\wfdIV_20261022\GeneratedPhasemasks"     # where it saves the phase masks
+    wfd_root: str = r"E:\wfdIV_20261022"    # Wavefront IV folder, holding script\ and GeneratedPhasemasks\
     nidaq_device: str = "Dev1"     # NI-DAQ device driving the shutter (as in Plerion)
     shutter_ao: int = 0            # its analog output channel
     path: str = field(default="", compare=False)   # where this config is saved (not serialised)
@@ -40,6 +39,16 @@ class Config:
     def holo(self) -> Calibration:
         return Calibration.from_dict(self.holo_cal, HOLO_DEFAULT)
 
+    @property
+    def wfd_script_dir(self) -> str:
+        """Folder Wavefront watches for scripts."""
+        return str(Path(self.wfd_root) / "script")
+
+    @property
+    def wfd_output_dir(self) -> str:
+        """Folder Wavefront saves the phase masks in."""
+        return str(Path(self.wfd_root) / "GeneratedPhasemasks")
+
     def to_dict(self) -> dict:
         d = asdict(self)
         d.pop("path", None)
@@ -47,6 +56,9 @@ class Config:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Config":
+        d = dict(d)
+        if "wfd_root" not in d and d.get("wfd_script_dir"):     # older configs kept both folders
+            d["wfd_root"] = str(Path(d["wfd_script_dir"]).parent)
         known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__ and k != "path"}
         return cls(**known)
 

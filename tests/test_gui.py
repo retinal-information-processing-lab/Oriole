@@ -42,7 +42,7 @@ class FakeTask:
 def window(qapp, tmp_path, monkeypatch):
     daq_log = []
     monkeypatch.setattr("oriole.shutter._new_task", lambda device, ao: FakeTask(daq_log))
-    cfg = Config(wfd_script_dir=str(tmp_path / "wfd" / "script"), wfd_output_dir=str(tmp_path / "wfd" / "masks"))
+    cfg = Config(wfd_root=str(tmp_path / "wfd"))
     for d in (cfg.wfd_script_dir, cfg.wfd_output_dir):
         os.makedirs(d)
     w = MainWindow(cfg, config_path=tmp_path / "cfg.json")
@@ -147,15 +147,15 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert "Tools → Script engine → auto load (script folder)" in log()
 
     # --- brooms: the script folder at once, the mask folder after a yes
-    w.edit_script_dir.btn_purge.click()
+    w.btn_sweep_scripts.click()
     assert "script folder swept clean" in log() and not any(script_dir.iterdir())
-    w.edit_script_dir.btn_purge.click()
+    w.btn_sweep_scripts.click()
     assert "script folder already clean" in log()
     monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a, **k: QtWidgets.QMessageBox.StandardButton.No)
-    w.edit_output_dir.btn_purge.click()
+    w.btn_sweep_masks.click()
     assert w.combo_mask.count() == 2
     monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes)
-    w.edit_output_dir.btn_purge.click()
+    w.btn_sweep_masks.click()
     assert not any(out_dir.iterdir()) and w.combo_mask.count() == 0 and "#00FF00" in w.btn_generate.styleSheet()
     assert "phase mask folder swept clean (3 files)" in log()
     w.btn_open.click()
@@ -175,18 +175,18 @@ def test_settings_boxes_apply_and_save(window, tmp_path):
     w.spin_cols.setValue(1024)
     w.spin_dmd_px.setValue(2.0)
     assert w.config.dmd_shape == (768, 1024) and w.config.pixel_size_um == 2.0
-    other = tmp_path / "other"
-    other.mkdir()
-    w.edit_output_dir._set(str(other))
-    assert w.config.wfd_output_dir == str(other)
-    w.edit_script_dir._set(str(tmp_path / "missing"))
-    assert "folder not found" in w.log_view.toPlainText()
+    other = tmp_path / "wfdIV_other"
+    (other / "script").mkdir(parents=True)
+    w.edit_wfd_root._set(str(other))
+    assert w.config.wfd_script_dir == str(other / "script")
+    assert w.config.wfd_output_dir == str(other / "GeneratedPhasemasks")
+    assert "folder not found: " + str(other / "GeneratedPhasemasks") in w.log_view.toPlainText()
     w.edit_device.setText("Dev2")
     w.edit_device.editingFinished.emit()
     w.spin_ao.setValue(1)
     assert w.shutter.channel == "Dev2/ao1"
     saved = json.loads((tmp_path / "cfg.json").read_text())
-    assert (saved["dmd_width"], saved["shutter_ao"], saved["wfd_output_dir"]) == (1024, 1, str(other))
+    assert (saved["dmd_width"], saved["shutter_ao"], saved["wfd_root"]) == (1024, 1, str(other))
 
 
 def test_failures_are_logged(window, monkeypatch):
