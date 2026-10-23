@@ -53,6 +53,9 @@ size (2.5 µm, visual *Settings*). The line under the image shows where the mous
 
 **Spot Ø** is the diameter of every spot, in µm on the sample.
 
+The epi image is expected at **672 × 512 px** (width × height), the size the calibrations are made
+for: any other size gives a red error in the log and a big red banner above the holo calibration.
+
 **EXTRACT BIN** writes `YYYY_MM_DD_<N>Frames.bin` (N = number of spots; `_2`, `_3`… if the name
 is taken) in the folder you pick, for MEA3 (the only rig): for spot i (from 1) frame `2(i-1)` is
 the spot and `2(i-1)+1` its negative. `<bin>.json` lists the spots (px, µm) and frame indices.

@@ -31,6 +31,7 @@ ACTION_STYLE = """
     QPushButton:hover { background: #2A6A2A; }
     QPushButton:disabled { background: #3A3A3A; color: #666666; }
 """
+EPI_SIZE = (672, 512)      # width, height of the epi camera images the calibrations are made for
 AUTOLOAD_HINT = 'check that "Tools → Script engine → auto load (script folder)" is selected in Wavefront'
 BLOCKED_STYLE = ACTION_STYLE.replace("#1A4A1A", "#4A4A1A").replace("#00FF00", "#FFD700").replace("#2A6A2A", "#6A6A2A")
 
@@ -319,6 +320,13 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.spin_ao)
         col.addLayout(row)
         right.addWidget(setup)
+        self.lbl_image_warning = QtWidgets.QLabel()
+        self.lbl_image_warning.setWordWrap(True)
+        self.lbl_image_warning.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.lbl_image_warning.setStyleSheet("background: #B00000; color: white; font: bold 14pt 'Segoe UI';"
+                                             "padding: 8px; border-radius: 4px;")
+        self.lbl_image_warning.hide()
+        right.addWidget(self.lbl_image_warning)
         self.holo_box = CalibrationBox(self.config.holo)
         self.holo_box.changed.connect(self._on_calibration)
         right.addWidget(self.holo_box)
@@ -418,7 +426,17 @@ class MainWindow(QtWidgets.QMainWindow):
         """Show a camera image (from a file now; Micro-Manager snap / live later)."""
         self.image = np.asarray(image, dtype=np.float32)
         self.view.set_image(self.image)
-        self.log(f"image {Path(source).name or 'set'}: {self.image.shape[1]} x {self.image.shape[0]} px")
+        h, w = self.image.shape
+        self.log(f"image {Path(source).name or 'set'}: {w} x {h} px")
+        if (w, h) != EPI_SIZE:
+            self.lbl_image_warning.setText(f"IMAGE IS {w} × {h} px\nNOT {EPI_SIZE[0]} × {EPI_SIZE[1]}\n"
+                                           f"the calibrations do not apply")
+            self.lbl_image_warning.show()
+            self.log(f"WRONG IMAGE SIZE: {w} x {h} px instead of {EPI_SIZE[0]} x {EPI_SIZE[1]} (epi image); "
+                     f"the calibrations are made for {EPI_SIZE[0]} x {EPI_SIZE[1]} images, spot positions "
+                     f"will be wrong", "error")
+        else:
+            self.lbl_image_warning.hide()
 
     def _on_click(self, x: float, y: float, right: bool):
         if self.image is None:

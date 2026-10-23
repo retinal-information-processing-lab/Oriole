@@ -168,6 +168,15 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert json.loads((tmp_path / "cfg.json").read_text())["holo_cal"]["x_um"] == 6.0
 
 
+def test_wrong_image_size_warns(window):
+    w = window
+    w.set_image(np.zeros((672, 512), np.float32))          # rotated: 512 wide, 672 high
+    assert not w.lbl_image_warning.isHidden() and "512 × 672" in w.lbl_image_warning.text()
+    assert "WRONG IMAGE SIZE: 512 x 672 px instead of 672 x 512" in w.log_view.toPlainText()
+    w.set_image(np.zeros((512, 672), np.float32))          # 672 wide, 512 high: fine
+    assert w.lbl_image_warning.isHidden()
+
+
 def test_settings_boxes_apply_and_save(window, tmp_path):
     w = window
     assert not [b for b in w.findChildren(QtWidgets.QPushButton) if "Settings" in b.text()]
