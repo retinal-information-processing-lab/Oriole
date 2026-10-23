@@ -4,9 +4,9 @@ import pytest
 
 from oriole.binfile import BinFile, read_header
 from oriole.calibration import (Calibration, fit_affine, apply_affine, make_calibration_bin,
-                                     target_mask, target_geometry, similarity_matrix,
-                                     dmd_to_camera_matrix, decompose_similarity, refine_fit,
-                                     template_signal, reference_image)
+                                target_mask, target_geometry, similarity_matrix,
+                                dmd_to_camera_matrix, decompose_similarity, refine_fit,
+                                template_signal, reference_image)
 from tests.conftest import synthetic_camera_image
 
 

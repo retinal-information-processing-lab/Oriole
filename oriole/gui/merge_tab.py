@@ -1,4 +1,4 @@
-"""Merge tab: append pattern sets (pos + neg frames) to an existing bin file."""
+"""Merge tab: append pattern sets (pos + neg frames) or small pattern bins to an existing bin file."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -11,6 +11,10 @@ from ..merge import merge_bin, plan_merge
 from ..patterns import pattern_stem, NPZ_SUFFIX
 
 
+def _source_stem(path: str) -> str:
+    return Path(path).stem if path.lower().endswith(".bin") else pattern_stem(path).name
+
+
 class MergeTab(QtWidgets.QWidget):
     status = QtCore.pyqtSignal(str)
 
@@ -20,7 +24,8 @@ class MergeTab(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
 
         info = QtWidgets.QLabel(
-            "Appends the <b>pos</b> and <b>neg</b> frame of every mask in the selected pattern sets to the "
+            "Appends the <b>pos</b> and <b>neg</b> frame of every mask in the selected pattern sets, or the "
+            "frames of a small pattern bin (<code>YYYY_MM_DD_NFrames.bin</code> written by Export), to the "
             "end of the original bin. The original file is never modified and its frame indices are "
             "unchanged. An <code>.indices.json</code> next to the output lists the new indices for your vec script.")
         info.setWordWrap(True)
@@ -38,7 +43,7 @@ class MergeTab(QtWidgets.QWidget):
         self.lbl_header = QtWidgets.QLabel("")
         form.addWidget(self.lbl_header, 1, 1)
 
-        form.addWidget(QtWidgets.QLabel("Pattern sets"), 2, 0, QtCore.Qt.AlignmentFlag.AlignTop)
+        form.addWidget(QtWidgets.QLabel("Patterns\n(npz or bin)"), 2, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         self.list = QtWidgets.QListWidget()
         self.list.setMaximumHeight(110)
         form.addWidget(self.list, 2, 1)
@@ -89,9 +94,12 @@ class MergeTab(QtWidgets.QWidget):
         if not paths:
             start = self.config.last_dir or str(Path.home())
             paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-                self, "Pattern sets", start, f"Pattern masks (*{NPZ_SUFFIX});;NPZ (*.npz);;All files (*)")
+                self, "Pattern sets", start,
+                f"Patterns (*{NPZ_SUFFIX} *.bin);;Pattern masks (*{NPZ_SUFFIX});;Pattern bins (*.bin);;All files (*)")
         for p in paths or []:
-            p = str(Path(str(pattern_stem(p)) + NPZ_SUFFIX)) if not str(p).endswith(".npz") else str(p)
+            p = str(p)
+            if not p.endswith(".npz") and not p.lower().endswith(".bin"):
+                p = str(Path(str(pattern_stem(p)) + NPZ_SUFFIX))
             if p not in self.pattern_files():
                 self.list.addItem(p)
         self.refresh()
@@ -111,7 +119,7 @@ class MergeTab(QtWidgets.QWidget):
         src = self.edit_bin.text().strip()
         files = self.pattern_files()
         if src and files and not self.edit_out.text().strip():
-            names = "_".join(pattern_stem(f).name for f in files)
+            names = "_".join(_source_stem(f) for f in files)
             self.edit_out.setText(str(Path(src).with_name(f"{Path(src).stem}_{names}.bin")))
 
     def refresh(self):
@@ -140,7 +148,7 @@ class MergeTab(QtWidgets.QWidget):
         self.table.setRowCount(len(plan["entries"]))
         for r, e in enumerate(plan["entries"]):
             for c, v in enumerate([e["frame"], e["pos_idx"], e["neg_idx"], e["n_pixels"]]):
-                self.table.setItem(r, c, QtWidgets.QTableWidgetItem(str(v)))
+                self.table.setItem(r, c, QtWidgets.QTableWidgetItem("" if v is None else str(v)))
         self.lbl_summary.setText(f"{plan['n_original']} original + {plan['n_new']} new = "
                                  f"{plan['n_original'] + plan['n_new']} frames")
         self._suggest_out()

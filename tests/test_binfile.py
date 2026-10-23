@@ -62,6 +62,13 @@ def test_append_bytes_verbatim(tmp_path):
     assert read_raw_frame_bytes(path, 0) == raw
 
 
+def test_header_above_int16_range_roundtrips(tmp_path):
+    path = tmp_path / "big.bin"
+    with BinFile(str(path), 6, 4, rig_id=3, nb_images=40000, mode="w"):
+        pass                                    # header only: nb_images > 32767 used to overflow
+    assert read_header(path) == {"xsize": 6, "ysize": 4, "nb_images": 40000, "nb_bits": 8}
+
+
 def test_append_wrong_shape_raises(tmp_path):
     with BinFile(str(tmp_path / "c.bin"), 6, 4, rig_id=3, nb_images=1, mode="w") as bf:
         with pytest.raises(AssertionError):

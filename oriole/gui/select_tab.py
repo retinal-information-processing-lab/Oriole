@@ -467,11 +467,12 @@ class SelectTab(QtWidgets.QWidget):
             return
         self.config.last_dir = directory
         self.config.save()
-        self.status.emit(f"Exported {len(res['frames'])} frames to {res['npz']}")
+        self.status.emit(f"Exported {len(res['frames'])} patterns to {res['bin']}")
         QtWidgets.QMessageBox.information(
             self, "Pattern set exported",
-            f"Masks: {res['npz']}\nDescription: {res['json']}\nPreviews: {res['previews']}\n\n"
-            f"Frames: {', '.join(res['frames'])}\n\nUse the Merge tab (or the CLI) to append them to a bin.")
+            f"Bin (pos + neg per pattern): {res['bin']}\nMasks: {res['npz']}\nDescription: {res['json']}\n"
+            f"Previews: {res['previews']}\n\nPatterns: {', '.join(res['frames'])}\n\n"
+            f"Use the Merge tab (or the CLI) to merge the bin into another bin.")
 
     def load_pattern_dialog(self):
         start = self.config.last_dir or str(Path.home())

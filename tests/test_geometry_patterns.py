@@ -1,10 +1,14 @@
+import datetime
 import json
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+from oriole.binfile import read_header
 from oriole.calibration import Calibration
 from oriole.geometry import (Circle, Polygon, rasterize_shape, rasterize_shapes,
-                                  simplify_polyline, shape_in_field, shape_from_dict)
+                             simplify_polyline, shape_in_field, shape_from_dict)
 from oriole.patterns import PatternSet, load_masks, pattern_stem
 
 
@@ -96,6 +100,10 @@ def test_patternset_frames_and_export(small_config, tmp_path):
     assert meta == {"dmd_shape": (64, 80), "pixel_size_um": 2.5, "rig_id": 3}
     assert (tmp_path / "cells_1_previews" / "cells_1_all_pos.png").exists()
     assert (tmp_path / "cells_1_previews" / "cells_1_all_neg.png").exists()
+    # small standalone bin: N = 4 patterns in the name, pos + neg = 8 frames inside
+    assert Path(res["bin"]).name == f"{datetime.date.today():%Y_%m_%d}_4Frames.bin"
+    assert read_header(res["bin"]) == {"xsize": 80, "ysize": 64, "nb_images": 8, "nb_bits": 8}
+    assert json.load(open(res["json"]))["bin"] == Path(res["bin"]).name
 
     # reload for editing gives the same masks
     ps2 = PatternSet.load(res["json"])

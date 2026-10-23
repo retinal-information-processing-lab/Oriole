@@ -38,7 +38,8 @@ def main(argv=None) -> int:
 
     p_merge = sub.add_parser("merge", help="append pattern frames (pos+neg) to a bin file")
     p_merge.add_argument("--bin", required=True, dest="original", help="original bin (never modified)")
-    p_merge.add_argument("--patterns", required=True, nargs="+", help="one or more .patterns.npz files")
+    p_merge.add_argument("--patterns", required=True, nargs="+",
+                         help="one or more .patterns.npz files or small pattern bins (YYYY_MM_DD_NFrames.bin)")
     p_merge.add_argument("--out", required=True, help="output bin path")
     p_merge.add_argument("--rig", type=int, help="override rig_id used for the appended frames")
 
@@ -65,7 +66,9 @@ def main(argv=None) -> int:
         print(f"wrote {m['output_bin']}: {m['n_original_frames']} original + "
               f"{m['n_total_frames'] - m['n_original_frames']} new frames")
         for name, e in m["frames"].items():
-            print(f"  {name}: pos_idx={e['pos_idx']} neg_idx={e['neg_idx']} ({e['n_pixels']} px)")
+            neg = "" if e["neg_idx"] is None else f" neg_idx={e['neg_idx']}"
+            px = "" if e["n_pixels"] is None else f" ({e['n_pixels']} px)"
+            print(f"  {name}: pos_idx={e['pos_idx']}{neg}{px}")
         print(f"indices: {m['indices_json']}")
         return 0
 

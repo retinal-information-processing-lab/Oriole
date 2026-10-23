@@ -3,7 +3,8 @@
 A pattern set is saved as two files with the same stem:
   <name>.patterns.npz   masks (uint8, N x H x W) + frame names  -> used by merge (source of truth)
   <name>.patterns.json  shapes in camera coords, calibration, config, provenance -> re-editable
-plus a preview PNG per frame in <name>_previews/.
+plus a preview PNG per frame in <name>_previews/ and a small standalone bin
+YYYY_MM_DD_<N>Frames.bin (pos + neg frame per pattern, N = number of patterns).
 """
 from __future__ import annotations
 
@@ -36,6 +37,15 @@ def pattern_stem(path) -> Path:
         if s.endswith(suf):
             return Path(s[: -len(suf)])
     return p
+
+
+def pattern_bin_name(n_patterns: int, date: _dt.date | None = None, directory=None) -> str:
+    """``YYYY_MM_DD_<N>Frames.bin``; a name already taken in ``directory`` gets ``_2``, ``_3``..."""
+    base = f"{(date or _dt.date.today()):%Y_%m_%d}_{n_patterns}Frames"
+    name, k = f"{base}.bin", 2
+    while directory is not None and (Path(directory) / name).exists():
+        name, k = f"{base}_{k}.bin", k + 1
+    return name
 
 
 @dataclass
@@ -129,7 +139,8 @@ class PatternSet:
 
     def export(self, directory, combined: bool | None = None, per_shape: bool | None = None,
                previews: bool = True) -> dict:
-        """Write <name>.patterns.npz + .json (+ previews). Returns paths and frame names."""
+        """Write <name>.patterns.npz + .json + the small dated bin (+ previews). Returns paths and frame names."""
+        from .merge import write_pattern_bin      # merge imports this module
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         stem = directory / _safe(self.name)
@@ -144,9 +155,12 @@ class PatternSet:
                             dmd_shape=np.array(self.config.dmd_shape),
                             pixel_size_um=np.array(self.config.pixel_size_um),
                             rig_id=np.array(self.config.rig_id))
+        bin_path = directory / pattern_bin_name(len(frames), directory=directory)
+        write_pattern_bin(npz_path, bin_path)
         d = self.to_dict()
         d["frames"] = [{"name": n, "n_pixels": int(m.sum())} for n, m in frames]
         d["npz"] = npz_path.name
+        d["bin"] = bin_path.name
         json_path = Path(str(stem) + JSON_SUFFIX)
         with open(json_path, "w") as f:
             json.dump(d, f, indent=2)
@@ -159,7 +173,7 @@ class PatternSet:
             for n, m in frames:
                 imageio.imwrite(str(preview_dir / f"{n}_pos.png"), (m * 255).astype(np.uint8))
                 imageio.imwrite(str(preview_dir / f"{n}_neg.png"), ((~m) * 255).astype(np.uint8))
-        return {"npz": str(npz_path), "json": str(json_path),
+        return {"npz": str(npz_path), "json": str(json_path), "bin": str(bin_path),
                 "previews": str(preview_dir) if preview_dir else "", "frames": names}
 
     @classmethod

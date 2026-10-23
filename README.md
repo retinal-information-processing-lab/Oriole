@@ -35,7 +35,7 @@ Run everything from this folder:
 ```
 python -m oriole gui                      # the application
 python -m oriole calib-bin --out calibration_target_MEA3.bin
-python -m oriole merge --bin orig.bin --patterns cells.patterns.npz --out orig_cells.bin
+python -m oriole merge --bin orig.bin --patterns 2026_10_23_3Frames.bin --out orig_cells.bin
 python -m oriole info some.bin
 python -m pytest tests                    # self-tests
 ```
@@ -76,14 +76,21 @@ calibration is shown at the top right of the Select tab (green = recent, orange 
      every shape by that many µm in the DMD frame.
    * The preview shows the real DMD frame (image warped into DMD space, pattern in red, toggle
      *show negative*). Shapes leaving the DMD field are flagged.
-   * *Export*: choose a folder; writes `<name>.patterns.npz` (the masks — source of truth),
-     `<name>.patterns.json` (shapes, calibration, image path; reloadable with *Load pattern set*)
-     and `<name>_previews/` PNGs. Tick *combined* for one frame with all shapes and/or
-     *per shape* for one frame per shape.
+   * *Export*: choose a folder; writes
+     * `YYYY_MM_DD_<N>Frames.bin`, a small standalone bin like the classic stimulus bins:
+       pos then neg frame for each of the N patterns (2N frames), with
+       `<bin>.indices.json` listing the frame indices. A second export the same day with the
+       same N gets `_2`, `_3`... instead of overwriting.
+     * `<name>.patterns.npz` (the masks — source of truth), `<name>.patterns.json` (shapes,
+       calibration, image path; reloadable with *Load pattern set*) and `<name>_previews/` PNGs.
+
+     Tick *combined* for one pattern with all shapes and/or *per shape* for one pattern per shape.
    * Everything is autosaved to `~/.oriole/autosave.patterns.json`.
 3. **Merge into bin** (GUI tab or CLI, usable on any number of bins with the exact same masks)
-   * Pick the original bin, add one or more `.patterns.npz`, pick an output path.
-   * The output is the original frames byte for byte, followed by `pos, neg` for each mask.
+   * Pick the original (linked) bin, add one or more small pattern bins
+     (`YYYY_MM_DD_NFrames.bin`) or `.patterns.npz`, pick an output path.
+   * The output is the original frames byte for byte, followed by `pos, neg` for each mask
+     (a small bin is copied byte for byte, so merging it or its `.npz` gives the same file).
      The original bin is never modified, so all existing vec indices stay valid.
    * `<output>.indices.json` lists `pos_idx` / `neg_idx` for every frame — use these in the vec
      generation script in place of the full-field background index.
@@ -103,8 +110,8 @@ oriole/
   binfile.py      bin reader / writer (+ raw byte copy)
   calibration.py  calibration target, similarity fit / refinement, Calibration JSON
   geometry.py     Circle / Polygon shapes, simplification, rasterisation to DMD masks
-  patterns.py     PatternSet: frames (combined / per shape), export / load
-  merge.py        append masks as pos/neg frames to a bin, index JSON
+  patterns.py     PatternSet: frames (combined / per shape), export / load, dated bin name
+  merge.py        masks as pos/neg frames: small standalone bin, merge into a bin, index JSON
   images.py       image loading, warp to DMD space
   cli.py          gui | calib-bin | merge | info
   gui/            PyQt6 + pyqtgraph application (select / merge / calibration tabs)

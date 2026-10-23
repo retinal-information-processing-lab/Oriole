@@ -1,3 +1,4 @@
+import datetime
 import json
 import shutil
 import numpy as np
@@ -7,8 +8,8 @@ from oriole.binfile import BinFile, read_header, read_raw_frame_bytes
 from oriole.calibration import Calibration
 from oriole.cli import main
 from oriole.geometry import Circle
-from oriole.merge import merge_bin, plan_merge
-from oriole.patterns import PatternSet, load_masks
+from oriole.merge import merge_bin, plan_merge, write_pattern_bin
+from oriole.patterns import PatternSet, load_masks, pattern_bin_name
 from tests.conftest import EXISTING_BIN, EXISTING_BIN_2
 
 
@@ -71,7 +72,64 @@ def test_merge_refuses_overwrite_and_shape_mismatch(config, small_config, patter
     tiny = ps.export(tmp_path / "tiny", previews=False)["npz"]
     with pytest.raises(ValueError, match="does not match"):
         plan_merge(EXISTING_BIN, [tiny])
+    tiny_bin = write_pattern_bin(tiny, tmp_path / "tiny_small.bin")["output_bin"]
+    with pytest.raises(ValueError, match="does not match"):
+        plan_merge(EXISTING_BIN, [tiny_bin])
+    small = write_pattern_bin(pattern_npz, tmp_path / "small.bin")["output_bin"]
+    with pytest.raises(ValueError, match="must differ"):
+        merge_bin(EXISTING_BIN, [small], small)
     assert not (tmp_path / "never.bin").exists()
+
+
+def test_pattern_bin_name(tmp_path):
+    d = datetime.date(2026, 10, 23)
+    assert pattern_bin_name(12, d) == "2026_10_23_12Frames.bin"
+    (tmp_path / "2026_10_23_12Frames.bin").touch()
+    assert pattern_bin_name(12, d, tmp_path) == "2026_10_23_12Frames_2.bin"
+    (tmp_path / "2026_10_23_12Frames_2.bin").touch()
+    assert pattern_bin_name(12, d, tmp_path) == "2026_10_23_12Frames_3.bin"
+    assert pattern_bin_name(3, d, tmp_path) == "2026_10_23_3Frames.bin"
+
+
+def test_small_bin_has_the_frames_a_merge_appends(pattern_npz, tmp_path):
+    small = tmp_path / "small.bin"
+    m = write_pattern_bin(pattern_npz, small)
+    assert read_header(small) == {"xsize": 672, "ysize": 672, "nb_images": 6, "nb_bits": 8}
+    assert (m["frames"]["cells_S1"]["pos_idx"], m["frames"]["cells_S1"]["neg_idx"]) == (2, 3)
+    assert json.load(open(m["indices_json"]))["rig_id"] == 3
+    merged = tmp_path / "merged.bin"
+    merge_bin(EXISTING_BIN, [pattern_npz], merged)
+    for k in range(6):
+        assert read_raw_frame_bytes(small, k) == read_raw_frame_bytes(merged, 15 + k)
+    with BinFile(str(small), rig_id=3, mode="r") as bf:
+        for k in range(3):
+            np.testing.assert_array_equal(bf.read_frame_uint8(2 * k).astype(int) + bf.read_frame_uint8(2 * k + 1), 255)
+
+
+def test_merging_small_bin_equals_merging_npz(pattern_npz, tmp_path):
+    small = tmp_path / "small.bin"
+    write_pattern_bin(pattern_npz, small)
+    via_npz, via_bin = tmp_path / "a.bin", tmp_path / "b.bin"
+    m_npz = merge_bin(EXISTING_BIN, [pattern_npz], via_npz)
+    m_bin = merge_bin(EXISTING_BIN, [small], via_bin)
+    assert via_npz.read_bytes() == via_bin.read_bytes()
+    key = lambda m: {n: (e["pos_idx"], e["neg_idx"], e["n_pixels"]) for n, e in m["frames"].items()}  # noqa: E731
+    assert key(m_bin) == key(m_npz)
+    assert m_bin["rig_id"] == 3
+
+
+def test_merge_bin_without_sidecar_and_duplicate_names(pattern_npz, tmp_path):
+    small = tmp_path / "small.bin"
+    write_pattern_bin(pattern_npz, small)
+    bare = tmp_path / "bare.bin"
+    shutil.copy(small, bare)            # no .indices.json: every frame is listed on its own
+    m = merge_bin(EXISTING_BIN, [pattern_npz, small, bare], tmp_path / "out.bin")
+    names = list(m["frames"])
+    assert names[:3] == ["cells_all", "cells_S1", "cells_S2"]
+    assert names[3:6] == ["small_cells_all", "small_cells_S1", "small_cells_S2"]      # no overwrite
+    assert names[6:] == [f"bare_{k}" for k in range(6)]
+    assert m["frames"]["bare_0"] == {"pos_idx": 27, "neg_idx": None, "n_pixels": None, "pattern_file": str(bare)}
+    assert read_header(tmp_path / "out.bin")["nb_images"] == 15 + 6 + 6 + 6
 
 
 def test_cli_merge_and_info(pattern_npz, tmp_path, capsys):
@@ -80,6 +138,9 @@ def test_cli_merge_and_info(pattern_npz, tmp_path, capsys):
     assert read_header(out)["nb_images"] == 21
     assert main(["info", str(out)]) == 0
     assert "21 frames" in capsys.readouterr().out
+    small = write_pattern_bin(pattern_npz, tmp_path / "small.bin")["output_bin"]
+    assert main(["merge", "--bin", str(EXISTING_BIN), "--patterns", small, "--out", str(tmp_path / "cli2.bin")]) == 0
+    assert "cells_S2: pos_idx=19 neg_idx=20" in capsys.readouterr().out
 
 
 def test_cli_calib_bin(tmp_path):

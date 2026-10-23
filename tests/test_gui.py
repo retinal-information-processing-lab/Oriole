@@ -165,6 +165,17 @@ def test_full_workflow(window, tmp_path, template_matrix):
         assert json.load(f)["frames"]["test_set_S3"] == {
             "pos_idx": 19, "neg_idx": 20, "n_pixels": int(masks[2].sum()), "pattern_file": str(npz)}
 
+    # the export also wrote the small dated bin (3 patterns -> 6 frames); merging it gives the same bin
+    small = next(out_dir.glob("*_3Frames.bin"))
+    assert read_header(small)["nb_images"] == 6
+    mt.list.clear()
+    mt.edit_out.clear()
+    mt.add_patterns([str(small)])
+    assert mt.table.item(2, 0).text() == "test_set_S3" and mt.table.item(2, 2).text() == "20"
+    assert mt.edit_out.text().endswith(f"orig_{small.stem}.bin")
+    mt.merge()
+    assert (tmp_path / f"orig_{small.stem}.bin").read_bytes() == out.read_bytes()
+
 
 def test_identity_calibration_and_settings(window, tmp_path):
     window.calibrate_tab.use_identity()

@@ -1,6 +1,6 @@
 """Bin file reader/writer for the DMD stimulation software.
 
-Format: header of 4 little-endian int16 (xsize, ysize, nb_images, nb_bits=8) followed by
+Format: header of 4 little-endian uint16 (xsize, ysize, nb_images, nb_bits=8) followed by
 raw uint8 frames of xsize*ysize bytes each.
 
 This is a copy of the lab's ``binfile.py`` with two fixes for numpy >= 1.24
@@ -208,7 +208,7 @@ class BinFile:
     # -- writing ----------------------------------------------------------
     def _write_header(self):
         header_list = [self._frame_xsize, self._frame_ysize, self._nb_images, self._nb_bits]
-        header_array = np.array(header_list, dtype="<i2")
+        header_array = np.array(header_list, dtype="<u2")     # as read_header; int16 overflowed above 32767 frames
         self._file.write(header_array.tobytes())
 
     def append(self, frame):
