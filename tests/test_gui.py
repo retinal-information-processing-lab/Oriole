@@ -178,8 +178,8 @@ def test_settings_boxes_apply_and_save(window, tmp_path):
     other = tmp_path / "wfdIV_other"
     (other / "script").mkdir(parents=True)
     w.edit_wfd_root._set(str(other))
-    assert w.config.wfd_script_dir == str(other / "script")
-    assert w.config.wfd_output_dir == str(other / "GeneratedPhasemasks")
+    assert w.config.wfd_script_dir == str(other / "script") == w.lbl_script_dir.text()
+    assert w.config.wfd_output_dir == str(other / "GeneratedPhasemasks") == w.lbl_output_dir.text()
     assert "folder not found: " + str(other / "GeneratedPhasemasks") in w.log_view.toPlainText()
     w.edit_device.setText("Dev2")
     w.edit_device.editingFinished.emit()

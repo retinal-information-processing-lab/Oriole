@@ -301,17 +301,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.edit_wfd_root.setToolTip("holds script\\ and GeneratedPhasemasks\\")
         self.edit_wfd_root.changed.connect(self._on_wavefront_root)
         col.addWidget(self.edit_wfd_root)
-        sweep = QtWidgets.QHBoxLayout()
-        self.btn_sweep_scripts = QtWidgets.QPushButton("🧹 script")
-        self.btn_sweep_scripts.setToolTip("Sweep script\\ clean")
-        self.btn_sweep_scripts.clicked.connect(self.sweep_script_folder)
-        self.btn_sweep_masks = QtWidgets.QPushButton("🧹 phase masks")
-        self.btn_sweep_masks.setToolTip("Sweep GeneratedPhasemasks\\ clean (asks first)")
-        self.btn_sweep_masks.clicked.connect(self.sweep_mask_folder)
-        for b in (self.btn_sweep_scripts, self.btn_sweep_masks):
-            b.setStyleSheet("padding: 4px 6px;")
-            sweep.addWidget(b)
-        col.addLayout(sweep)
+        self.lbl_script_dir, self.btn_sweep_scripts = self._derived_folder(
+            col, "script folder", "Sweep the script folder clean", self.sweep_script_folder)
+        self.lbl_output_dir, self.btn_sweep_masks = self._derived_folder(
+            col, "phase mask folder", "Sweep the phase mask folder clean (asks first)", self.sweep_mask_folder)
+        self._show_wavefront_dirs()
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("shutter"))
         self.edit_device = QtWidgets.QLineEdit(self.config.nidaq_device)
@@ -366,6 +360,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_view.setFont(QtGui.QFont("Consolas", 9))
         self.log_view.setStyleSheet("background: #0A0A0A; color: #00FF00; border: none;")
         root.addWidget(self.log_view)
+
+    @staticmethod
+    def _derived_folder(col: QtWidgets.QVBoxLayout, label: str, tip: str, sweep):
+        """Read-only path of a folder inside the Wavefront folder, with its broom."""
+        col.addWidget(QtWidgets.QLabel(label))
+        row = QtWidgets.QHBoxLayout()
+        path = QtWidgets.QLineEdit()
+        path.setReadOnly(True)
+        path.setStyleSheet("color: #9A9A9A;")
+        btn = QtWidgets.QPushButton("🧹")
+        btn.setFixedWidth(30)
+        btn.setStyleSheet("padding: 2px 0; font: 12pt 'Segoe UI Emoji';")
+        btn.setToolTip(tip)
+        btn.clicked.connect(sweep)
+        row.addWidget(path, stretch=1)
+        row.addWidget(btn)
+        col.addLayout(row)
+        return path, btn
+
+    def _show_wavefront_dirs(self):
+        for edit, folder in ((self.lbl_script_dir, self.config.wfd_script_dir),
+                             (self.lbl_output_dir, self.config.wfd_output_dir)):
+            edit.setText(folder)            # cursor at the end: the sub-folder name stays visible
+            edit.setToolTip(folder)
 
     @staticmethod
     def _panel(layout: QtWidgets.QLayout) -> QtWidgets.QWidget:
@@ -732,6 +750,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_wavefront_root(self, root: str):
         self.config.wfd_root = root
         self.save_config()
+        self._show_wavefront_dirs()
         for d in (self.config.wfd_script_dir, self.config.wfd_output_dir):
             if not Path(d).is_dir():
                 self.log(f"folder not found: {d}", "warn")

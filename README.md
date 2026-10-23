@@ -73,9 +73,9 @@ folder)* selected): one mask per spot, saved by Wavefront as `Pattern1_000.algoP
 * `Pattern_spots.json` next to the masks says which spot each mask is.
 
 **Wavefront folder** (holo *Settings*, `E:\wfdIV_20261022` by default): the scripts go to its
-`script\` and the masks are read from its `GeneratedPhasemasks\`. **🧹 script** sweeps the
-script folder clean at once, **🧹 phase masks** the mask folder after a confirmation (it lists
-how many files and their dates).
+`script\` and the masks are read from its `GeneratedPhasemasks\`; both paths are shown below it.
+The 🧹 next to the script folder sweeps it clean at once, the one next to the phase mask folder
+after a confirmation (it lists how many files and their dates).
 
 **Manual**: pick a mask number (the `Pattern<n>` found in the phase mask folder) and *Load* it
 onto the SLM (the script folder is emptied first, and the same 10 s check applies). *Open* /
