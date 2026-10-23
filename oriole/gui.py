@@ -23,6 +23,8 @@ from .shutter import Shutter, ShutterError
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
 BG, CARD, TEXT, DIM, BTN, ACCENT = "#121212", "#1E1E1E", "#E0E0E0", "#555555", "#2A2A2A", "#2D6A9F"
+PANEL_BG = "#181818"                                    # the three parts are cards on the window background
+VISUAL_COLOUR, IMAGE_COLOUR, HOLO_COLOUR = "#2D6A9F", "#3A3A3A", "#7A3E9D"
 SPOT = (255, 40, 40)
 LOG_COLOURS = {"info": "#00FF00", "warn": "#FFD700", "error": "#FF4444"}
 ACTION_STYLE = """
@@ -66,11 +68,77 @@ def apply_dark_theme(app: QtWidgets.QApplication):
     """)
 
 
-def _title(text: str) -> QtWidgets.QLabel:
+def _title(text: str, colour: str) -> QtWidgets.QLabel:
     lbl = QtWidgets.QLabel(text)
     lbl.setFont(QtGui.QFont("Consolas", 12, QtGui.QFont.Weight.Bold))
     lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+    lbl.setStyleSheet(f"background: {colour}; color: white; padding: 6px; border-radius: 4px;")
     return lbl
+
+
+def _card(layout: QtWidgets.QLayout, name: str, colour: str, width: int | None = None) -> QtWidgets.QFrame:
+    """One of the three parts: a framed card with a coloured top edge."""
+    card = QtWidgets.QFrame()
+    card.setObjectName(name)
+    card.setStyleSheet(f"QFrame#{name} {{ background: {PANEL_BG}; border: 1px solid #2E2E2E;"
+                       f" border-top: 3px solid {colour}; border-radius: 6px; }}")
+    card.setLayout(layout)
+    if width:
+        card.setFixedWidth(width)
+    return card
+
+
+def camera_target(w: int = EPI_SIZE[0], h: int = EPI_SIZE[1]) -> np.ndarray:
+    """'No image' placeholder, a cinema camera framing target of the expected size: RGB uint8 (h, w, 3)."""
+    img = QtGui.QImage(w, h, QtGui.QImage.Format.Format_RGB888)
+    img.fill(QtGui.QColor("#141414"))
+    p = QtGui.QPainter(img)
+    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    cx, cy, m = w / 2, h / 2, 16
+    grey, dark = QtGui.QColor("#3C3C3C"), QtGui.QColor("#2A2A2A")
+    # countdown-leader sweep, then rings and crosshair with ticks
+    p.setPen(QtCore.Qt.PenStyle.NoPen)
+    p.setBrush(QtGui.QColor("#1B2530"))
+    p.drawPie(QtCore.QRectF(cx - 200, cy - 200, 400, 400), 90 * 16, -110 * 16)
+    p.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+    for r, colour, width in ((200, grey, 1.5), (140, dark, 1.0), (80, grey, 1.5), (30, dark, 1.0)):
+        p.setPen(QtGui.QPen(colour, width))
+        p.drawEllipse(QtCore.QPointF(cx, cy), r, r)
+    p.setPen(QtGui.QPen(dark, 1))
+    p.drawLine(QtCore.QPointF(m, cy), QtCore.QPointF(w - m, cy))
+    p.drawLine(QtCore.QPointF(cx, m), QtCore.QPointF(cx, h - m))
+    for k in range(-20, 21):
+        t = 4 if k % 4 else 9
+        p.drawLine(QtCore.QPointF(cx + 16 * k, cy - t), QtCore.QPointF(cx + 16 * k, cy + t))
+        p.drawLine(QtCore.QPointF(cx - t, cy + 16 * k), QtCore.QPointF(cx + t, cy + 16 * k))
+    # frame, dashed safe area, accent corner brackets
+    p.setPen(QtGui.QPen(grey, 1.5))
+    p.drawRect(QtCore.QRectF(m, m, w - 2 * m, h - 2 * m))
+    p.setPen(QtGui.QPen(dark, 1, QtCore.Qt.PenStyle.DashLine))
+    p.drawRect(QtCore.QRectF(w * 0.1, h * 0.1, w * 0.8, h * 0.8))
+    p.setPen(QtGui.QPen(QtGui.QColor(ACCENT), 3))
+    for x, y, dx, dy in ((m, m, 1, 1), (w - m, m, -1, 1), (m, h - m, 1, -1), (w - m, h - m, -1, -1)):
+        p.drawLine(QtCore.QPointF(x, y), QtCore.QPointF(x + 44 * dx, y))
+        p.drawLine(QtCore.QPointF(x, y), QtCore.QPointF(x, y + 44 * dy))
+    p.setBrush(QtGui.QColor(ACCENT))
+    p.drawEllipse(QtCore.QPointF(cx, cy), 4, 4)
+    # labels
+    p.setPen(QtGui.QColor("#6A6A6A"))
+    p.setFont(QtGui.QFont("Consolas", 26, QtGui.QFont.Weight.Bold))
+    p.drawText(QtCore.QRectF(0, cy - 120, w, 40), QtCore.Qt.AlignmentFlag.AlignCenter, "NO IMAGE")
+    p.setPen(QtGui.QColor("#565656"))
+    p.setFont(QtGui.QFont("Consolas", 11))
+    p.drawText(QtCore.QRectF(0, cy + 90, w, 24), QtCore.Qt.AlignmentFlag.AlignCenter,
+               f"Load image…   epi  {w} × {h} px")
+    p.setFont(QtGui.QFont("Consolas", 9))
+    p.drawText(QtCore.QRectF(m + 8, m + 6, 200, 18), QtCore.Qt.AlignmentFlag.AlignLeft, "ORIOLE")
+    p.drawText(QtCore.QRectF(w - m - 208, h - m - 24, 200, 18), QtCore.Qt.AlignmentFlag.AlignRight,
+               f"{w} × {h}")
+    p.end()
+    bits = img.constBits()
+    bits.setsize(img.sizeInBytes())
+    rows = np.frombuffer(bits, np.uint8).reshape(h, img.bytesPerLine())
+    return rows[:, :3 * w].reshape(h, w, 3).copy()
 
 
 def _action_button(text: str) -> QtWidgets.QPushButton:
@@ -132,7 +200,7 @@ class ImageView(pg.GraphicsLayoutWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setBackground(BG)
+        self.setBackground(PANEL_BG)
         self.vb = _ClickViewBox()
         self.addItem(self.vb)
         self.image_item = pg.ImageItem()
@@ -145,6 +213,10 @@ class ImageView(pg.GraphicsLayoutWidget):
     def set_image(self, image: np.ndarray):
         lo, hi = np.percentile(image, [1, 99.7])
         self.image_item.setImage(image, levels=(lo, hi if hi > lo else lo + 1))
+        self.vb.autoRange()
+
+    def show_placeholder(self):
+        self.image_item.setImage(camera_target(), levels=(0, 255))
         self.vb.autoRange()
 
     def set_spots(self, spots, diameter_px: float):
@@ -225,11 +297,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
         cols = QtWidgets.QHBoxLayout()
+        cols.setSpacing(10)
         root.addLayout(cols, stretch=1)
 
         # visual (DMD)
         left = QtWidgets.QVBoxLayout()
-        left.addWidget(_title("VISUAL · DMD"))
+        left.addWidget(_title("VISUAL · DMD", VISUAL_COLOUR))
         dmd = QtWidgets.QGroupBox("Settings")
         form = QtWidgets.QFormLayout(dmd)
         self.spin_rows = QtWidgets.QSpinBox()
@@ -259,7 +332,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_merge.clicked.connect(self.merge)
         left.addWidget(self.btn_extract)
         left.addWidget(self.btn_merge)
-        cols.addWidget(self._panel(left))
+        cols.addWidget(_card(left, "visualCard", VISUAL_COLOUR, 290))
 
         # image
         mid = QtWidgets.QVBoxLayout()
@@ -286,15 +359,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.view = ImageView()
         self.view.vb.clicked.connect(self._on_click)
         self.view.mouseMoved.connect(self._on_mouse)
+        self.view.show_placeholder()
         mid.addWidget(self.view, stretch=1)
         self.lbl_mouse = QtWidgets.QLabel(" ")
         self.lbl_mouse.setStyleSheet(f"color: {DIM};")
         mid.addWidget(self.lbl_mouse)
-        cols.addLayout(mid, stretch=1)
+        cols.addWidget(_card(mid, "imageCard", IMAGE_COLOUR), stretch=1)
 
         # holo (SLM)
         right = QtWidgets.QVBoxLayout()
-        right.addWidget(_title("HOLO · SLM"))
+        right.addWidget(_title("HOLO · SLM", HOLO_COLOUR))
         setup = QtWidgets.QGroupBox("Settings")
         col = QtWidgets.QVBoxLayout(setup)
         col.addWidget(QtWidgets.QLabel("Wavefront folder"))
@@ -355,7 +429,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_generate = _action_button("GENERATE PHASE MASKS")
         self.btn_generate.clicked.connect(self.generate)
         right.addWidget(self.btn_generate)
-        cols.addWidget(self._panel(right))
+        cols.addWidget(_card(right, "holoCard", HOLO_COLOUR, 290))
         self._show_shutter()
         self.watcher = QtCore.QFileSystemWatcher(self)        # mask list and button follow the folder
         self.watcher.directoryChanged.connect(lambda _: self.refresh_masks())
@@ -392,13 +466,6 @@ class MainWindow(QtWidgets.QMainWindow):
                              (self.lbl_output_dir, self.config.wfd_output_dir)):
             edit.setText(folder)            # cursor at the end: the sub-folder name stays visible
             edit.setToolTip(folder)
-
-    @staticmethod
-    def _panel(layout: QtWidgets.QLayout) -> QtWidgets.QWidget:
-        w = QtWidgets.QWidget()
-        w.setLayout(layout)
-        w.setFixedWidth(270)
-        return w
 
     def log(self, text: str, level: str = "info"):
         self.log_view.appendHtml(f'<span style="color:{LOG_COLOURS[level]}">'

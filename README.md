@@ -39,7 +39,8 @@ The shutter needs `nidaqmx` and the NI-DAQmx driver; without them Oriole runs an
  log ──────────────────────────────────────────────────────────────────────────────
 ```
 
-Every value typed in the window is saved at once in `~/.oriole/config.json`.
+Every value typed in the window is saved at once in `~/.oriole/config.json`. Until an image is
+loaded the middle shows a camera framing target of the expected size (672 × 512).
 
 **Calibration** (typed by hand, one per side, kept in `~/.oriole/config.json`). A camera pixel
 `p` of an image of W × H pixels goes to

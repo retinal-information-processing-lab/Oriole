@@ -72,6 +72,9 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert not [b for b in w.findChildren(QtWidgets.QPushButton) if b.text() == "Reset"]
     assert QtWidgets.QApplication.instance().palette().color(QtGui.QPalette.ColorRole.Window).name() == "#121212"
 
+    # --- no image yet: the camera target placeholder (expected size) is shown, clicks only warn
+    assert w.image is None and w.view.image_item.image.shape == (512, 672, 3)
+
     # --- spots: left click adds, right click on a spot removes, undo
     w._on_click(10, 10, False)
     assert "load an image first" in log()
