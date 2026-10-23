@@ -69,6 +69,7 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     w = window
     log = w.log_view.toPlainText
     assert not w.findChildren(pg.HistogramLUTWidget)                   # no power / contrast scale
+    assert not [b for b in w.findChildren(QtWidgets.QPushButton) if b.text() == "Reset"]
     assert QtWidgets.QApplication.instance().palette().color(QtGui.QPalette.ColorRole.Window).name() == "#121212"
 
     # --- spots: left click adds, right click on a spot removes, undo

@@ -15,7 +15,7 @@ import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from . import holo, visual
-from .calibration import HOLO_DEFAULT, VISUAL_DEFAULT, Calibration
+from .calibration import Calibration
 from .config import DEFAULT_CONFIG_PATH, Config
 from .images import load_gray
 from .shutter import Shutter, ShutterError
@@ -23,7 +23,7 @@ from .shutter import Shutter, ShutterError
 pg.setConfigOptions(imageAxisOrder="row-major", antialias=True)
 
 BG, CARD, TEXT, DIM, BTN, ACCENT = "#121212", "#1E1E1E", "#E0E0E0", "#555555", "#2A2A2A", "#2D6A9F"
-SPOT = (255, 210, 0)
+SPOT = (255, 40, 40)
 LOG_COLOURS = {"info": "#00FF00", "warn": "#FFD700", "error": "#FF4444"}
 ACTION_STYLE = """
     QPushButton { background: #1A4A1A; color: #00FF00; border: none; border-radius: 4px;
@@ -85,9 +85,8 @@ class CalibrationBox(QtWidgets.QGroupBox):
     FIELDS = (("x_um", "X", " µm", 2, 0.5), ("y_um", "Y", " µm", 2, 0.5), ("rot_deg", "rotation", " °", 2, 0.5),
               ("stretch_x", "stretch X", " µm/px", 4, 0.005), ("stretch_y", "stretch Y", " µm/px", 4, 0.005))
 
-    def __init__(self, cal: Calibration, default: Calibration, parent=None):
+    def __init__(self, cal: Calibration, parent=None):
         super().__init__("Calibration", parent)
-        self.default = default
         form = QtWidgets.QFormLayout(self)
         self.spins: dict[str, QtWidgets.QDoubleSpinBox] = {}
         for key, label, suffix, decimals, step in self.FIELDS:
@@ -102,16 +101,9 @@ class CalibrationBox(QtWidgets.QGroupBox):
             self.spins[key] = sp
         self.spins["stretch_x"].setToolTip("µm per camera pixel; negative = mirror")
         self.spins["stretch_y"].setToolTip("µm per camera pixel; negative = mirror")
-        btn = QtWidgets.QPushButton("Reset")
-        btn.clicked.connect(lambda: self.set_calibration(self.default))
-        form.addRow(btn)
 
     def calibration(self) -> Calibration:
         return Calibration(**{k: sp.value() for k, sp in self.spins.items()})
-
-    def set_calibration(self, cal: Calibration):
-        for k, sp in self.spins.items():
-            sp.setValue(getattr(cal, k))
 
 
 class _ClickViewBox(pg.ViewBox):
@@ -142,7 +134,7 @@ class ImageView(pg.GraphicsLayoutWidget):
         self.addItem(self.vb)
         self.image_item = pg.ImageItem()
         self.vb.addItem(self.image_item)
-        self.spot_item = pg.ScatterPlotItem(pxMode=False, symbol="o", pen=pg.mkPen(SPOT, width=2), brush=None)
+        self.spot_item = pg.ScatterPlotItem(pxMode=False, symbol="o", pen=None, brush=pg.mkBrush(SPOT))
         self.vb.addItem(self.spot_item)
         self.labels: list[pg.TextItem] = []
         self.scene().sigMouseMoved.connect(self._on_mouse)
@@ -160,6 +152,7 @@ class ImageView(pg.GraphicsLayoutWidget):
         self.spot_item.setData(pos=pts, size=diameter_px)
         for k, (x, y) in enumerate(pts):
             lbl = pg.TextItem(str(k + 1), color=SPOT, anchor=(0.5, 1.0))
+            lbl.setFont(QtGui.QFont("Segoe UI", 11, QtGui.QFont.Weight.Bold))
             lbl.setPos(x, y - diameter_px / 2)
             self.vb.addItem(lbl)
             self.labels.append(lbl)
@@ -261,7 +254,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # visual (DMD)
         left = QtWidgets.QVBoxLayout()
         left.addWidget(_title("VISUAL · DMD"))
-        self.visual_box = CalibrationBox(self.config.visual, VISUAL_DEFAULT)
+        self.visual_box = CalibrationBox(self.config.visual)
         self.visual_box.changed.connect(self._on_calibration)
         left.addWidget(self.visual_box)
         left.addStretch(1)
@@ -310,7 +303,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # holo (SLM)
         right = QtWidgets.QVBoxLayout()
         right.addWidget(_title("HOLO · SLM"))
-        self.holo_box = CalibrationBox(self.config.holo, HOLO_DEFAULT)
+        self.holo_box = CalibrationBox(self.config.holo)
         self.holo_box.changed.connect(self._on_calibration)
         right.addWidget(self.holo_box)
         manual = QtWidgets.QGroupBox("Manual")
