@@ -14,7 +14,7 @@ cd /d "%~dp0"
 call "%CONDA_PATH%"
 conda env list | findstr /B /C:"oriole " >nul
 if errorlevel 1 (
-    echo Environnement 'oriole' introuvable : creation depuis environment.yml (quelques minutes)...
+    echo Environnement 'oriole' introuvable : creation depuis environment.yml ^(quelques minutes^)...
     conda env create -f environment.yml -y
     if errorlevel 1 (
         echo La creation de l'environnement a echoue.
