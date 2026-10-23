@@ -142,6 +142,27 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert json.loads((tmp_path / "cfg.json").read_text())["holo_cal"]["x_um"] == 6.0
 
 
+def test_settings_boxes_apply_and_save(window, tmp_path):
+    w = window
+    assert not [b for b in w.findChildren(QtWidgets.QPushButton) if "Settings" in b.text()]
+    w.spin_rows.setValue(768)
+    w.spin_cols.setValue(1024)
+    w.spin_dmd_px.setValue(2.0)
+    assert w.config.dmd_shape == (768, 1024) and w.config.pixel_size_um == 2.0
+    other = tmp_path / "other"
+    other.mkdir()
+    w.edit_output_dir._set(str(other))
+    assert w.config.wfd_output_dir == str(other)
+    w.edit_script_dir._set(str(tmp_path / "missing"))
+    assert "folder not found" in w.log_view.toPlainText()
+    w.edit_device.setText("Dev2")
+    w.edit_device.editingFinished.emit()
+    w.spin_ao.setValue(1)
+    assert w.shutter.channel == "Dev2/ao1"
+    saved = json.loads((tmp_path / "cfg.json").read_text())
+    assert (saved["dmd_width"], saved["shutter_ao"], saved["wfd_output_dir"]) == (1024, 1, str(other))
+
+
 def test_failures_are_logged(window, monkeypatch):
     w = window
     log = w.log_view.toPlainText
@@ -151,7 +172,7 @@ def test_failures_are_logged(window, monkeypatch):
     w._on_click(50.0, 50.0, False)
 
     # Wavefront never takes the script: timeout, then the stale test.js blocks the next request
-    w.config.wfd_timeout_s = -1
+    monkeypatch.setattr("oriole.holo.TIMEOUT_S", -1)
     w.generate()
     w.poll()
     assert "auto-load" in log() and w.btn_generate.isEnabled()

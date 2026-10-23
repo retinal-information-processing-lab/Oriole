@@ -163,63 +163,34 @@ class ImageView(pg.GraphicsLayoutWidget):
             self.mouseMoved.emit(p.x(), p.y())
 
 
-class SettingsDialog(QtWidgets.QDialog):
-    def __init__(self, config: Config, parent=None):
+class FolderEdit(QtWidgets.QWidget):
+    """Folder path (typed or picked with …); ``changed`` when it is edited."""
+
+    changed = QtCore.pyqtSignal(str)
+
+    def __init__(self, value: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Settings")
-        form = QtWidgets.QFormLayout(self)
-        self.rig = QtWidgets.QComboBox()
-        self.rig.addItems(["2", "3"])
-        self.rig.setCurrentText(str(config.rig_id))
-        self.h = QtWidgets.QSpinBox(); self.h.setRange(8, 4096); self.h.setValue(config.dmd_height)
-        self.w = QtWidgets.QSpinBox(); self.w.setRange(8, 4096); self.w.setValue(config.dmd_width)
-        self.px = QtWidgets.QDoubleSpinBox(); self.px.setRange(0.01, 100); self.px.setDecimals(3)
-        self.px.setSuffix(" µm"); self.px.setValue(config.pixel_size_um)
-        self.script_dir = self._folder(config.wfd_script_dir)
-        self.output_dir = self._folder(config.wfd_output_dir)
-        self.prefix = QtWidgets.QLineEdit(config.wfd_profile_prefix)
-        self.timeout = QtWidgets.QDoubleSpinBox(); self.timeout.setRange(1, 3600); self.timeout.setSuffix(" s")
-        self.timeout.setValue(config.wfd_timeout_s)
-        self.device = QtWidgets.QLineEdit(config.nidaq_device)
-        self.ao = QtWidgets.QSpinBox(); self.ao.setRange(0, 31); self.ao.setPrefix("ao"); self.ao.setValue(config.shutter_ao)
-        self.open_v = QtWidgets.QDoubleSpinBox(); self.open_v.setRange(0.1, 10); self.open_v.setSuffix(" V")
-        self.open_v.setValue(config.shutter_open_v)
-        for label, w in (("DMD rig", self.rig), ("DMD rows", self.h), ("DMD columns", self.w),
-                         ("DMD pixel on the sample", self.px), ("Wavefront script folder", self.script_dir),
-                         ("Wavefront phase mask folder", self.output_dir), ("phase mask name", self.prefix),
-                         ("wait for Wavefront at most", self.timeout), ("shutter NI-DAQ device", self.device),
-                         ("shutter output", self.ao), ("shutter open voltage", self.open_v)):
-            form.addRow(label, w)
-        bb = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Ok |
-                                        QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        form.addRow(bb)
-
-    def _folder(self, value: str) -> QtWidgets.QWidget:
-        box = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(box)
+        row = QtWidgets.QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        box.edit = QtWidgets.QLineEdit(value)
-        box.edit.setMinimumWidth(320)
+        self.edit = QtWidgets.QLineEdit(value)
+        self.edit.setToolTip(value)
+        self.edit.editingFinished.connect(lambda: self._set(self.edit.text()))
         btn = QtWidgets.QPushButton("…")
-        btn.clicked.connect(lambda: box.edit.setText(
-            QtWidgets.QFileDialog.getExistingDirectory(self, "Folder", box.edit.text()) or box.edit.text()))
-        row.addWidget(box.edit)
+        btn.setFixedWidth(30)
+        btn.setStyleSheet("padding: 4px 0;")
+        btn.clicked.connect(self._browse)
+        row.addWidget(self.edit, stretch=1)
         row.addWidget(btn)
-        return box
 
-    def apply(self, config: Config):
-        config.rig_id = int(self.rig.currentText())
-        config.dmd_height, config.dmd_width = self.h.value(), self.w.value()
-        config.pixel_size_um = self.px.value()
-        config.wfd_script_dir = self.script_dir.edit.text().strip()
-        config.wfd_output_dir = self.output_dir.edit.text().strip()
-        config.wfd_profile_prefix = self.prefix.text().strip() or "Pattern"
-        config.wfd_timeout_s = self.timeout.value()
-        config.nidaq_device = self.device.text().strip() or "Dev1"
-        config.shutter_ao = self.ao.value()
-        config.shutter_open_v = self.open_v.value()
+    def _browse(self):
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Folder", self.edit.text())
+        if folder:
+            self._set(str(Path(folder)))
+
+    def _set(self, folder: str):
+        self.edit.setText(folder.strip())
+        self.edit.setToolTip(folder.strip())
+        self.changed.emit(folder.strip())
 
 
 # ----------------------------------------------------------------------------- window
@@ -232,7 +203,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spots: list[tuple[float, float]] = []      # camera px
         self.undo_stack: list[list[tuple[float, float]]] = []
         self.last_spot_bin: Path | None = None
-        self.shutter = Shutter(config.nidaq_device, config.shutter_ao, config.shutter_open_v)
+        self.shutter = Shutter(config.nidaq_device, config.shutter_ao)
         self.jobs: list[tuple[str, str, Path]] = []      # phase masks still to compute
         self.generation: dict | None = None
         self.timer = QtCore.QTimer(self)
@@ -257,6 +228,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.visual_box = CalibrationBox(self.config.visual)
         self.visual_box.changed.connect(self._on_calibration)
         left.addWidget(self.visual_box)
+        dmd = QtWidgets.QGroupBox("DMD (MEA3)")
+        form = QtWidgets.QFormLayout(dmd)
+        self.spin_rows = QtWidgets.QSpinBox()
+        self.spin_cols = QtWidgets.QSpinBox()
+        for sp, value in ((self.spin_rows, self.config.dmd_height), (self.spin_cols, self.config.dmd_width)):
+            sp.setRange(8, 4096)
+            sp.setSuffix(" px")
+            sp.setValue(value)
+            sp.valueChanged.connect(self._on_dmd)
+        self.spin_dmd_px = QtWidgets.QDoubleSpinBox()
+        self.spin_dmd_px.setRange(0.01, 100)
+        self.spin_dmd_px.setDecimals(3)
+        self.spin_dmd_px.setSuffix(" µm")
+        self.spin_dmd_px.setValue(self.config.pixel_size_um)
+        self.spin_dmd_px.valueChanged.connect(self._on_dmd)
+        form.addRow("rows", self.spin_rows)
+        form.addRow("columns", self.spin_cols)
+        form.addRow("pixel size", self.spin_dmd_px)
+        left.addWidget(dmd)
         left.addStretch(1)
         self.btn_extract = _action_button("EXTRACT BIN")
         self.btn_extract.clicked.connect(self.extract)
@@ -287,9 +277,6 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addStretch(1)
         self.lbl_count = QtWidgets.QLabel()
         bar.addWidget(self.lbl_count)
-        btn = QtWidgets.QPushButton("Settings…")
-        btn.clicked.connect(self.open_settings)
-        bar.addWidget(btn)
         mid.addLayout(bar)
         self.view = ImageView()
         self.view.vb.clicked.connect(self._on_click)
@@ -321,6 +308,29 @@ class MainWindow(QtWidgets.QMainWindow):
         grid.addWidget(self.btn_open, 2, 0)
         grid.addWidget(self.btn_close, 2, 1)
         right.addWidget(manual)
+        setup = QtWidgets.QGroupBox("Wavefront && shutter")
+        col = QtWidgets.QVBoxLayout(setup)
+        col.addWidget(QtWidgets.QLabel("script folder"))
+        self.edit_script_dir = FolderEdit(self.config.wfd_script_dir)
+        self.edit_script_dir.changed.connect(self._on_wavefront_dirs)
+        col.addWidget(self.edit_script_dir)
+        col.addWidget(QtWidgets.QLabel("phase mask folder"))
+        self.edit_output_dir = FolderEdit(self.config.wfd_output_dir)
+        self.edit_output_dir.changed.connect(self._on_wavefront_dirs)
+        col.addWidget(self.edit_output_dir)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("shutter"))
+        self.edit_device = QtWidgets.QLineEdit(self.config.nidaq_device)
+        self.edit_device.editingFinished.connect(self._on_shutter_output)
+        self.spin_ao = QtWidgets.QSpinBox()
+        self.spin_ao.setRange(0, 31)
+        self.spin_ao.setPrefix("ao")
+        self.spin_ao.setValue(self.config.shutter_ao)
+        self.spin_ao.valueChanged.connect(self._on_shutter_output)
+        row.addWidget(self.edit_device, stretch=1)
+        row.addWidget(self.spin_ao)
+        col.addLayout(row)
+        right.addWidget(setup)
         right.addStretch(1)
         self.btn_generate = _action_button("GENERATE PHASE MASKS")
         self.btn_generate.clicked.connect(self.generate)
@@ -500,11 +510,11 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if not self._have_spots():
             return
-        out_dir, prefix = Path(self.config.wfd_output_dir), self.config.wfd_profile_prefix
+        out_dir = Path(self.config.wfd_output_dir)
         if not out_dir.is_dir() or not self.client().script_dir.is_dir():
-            self.log(f"Wavefront folders not found ({self.config.wfd_script_dir}, {out_dir}): see Settings", "error")
+            self.log(f"Wavefront folders not found ({self.config.wfd_script_dir}, {out_dir})", "error")
             return
-        old = holo.old_masks(out_dir, prefix)
+        old = holo.old_masks(out_dir)
         if old:
             choice = self.ask_old_masks(old)
             if choice == "cancel":
@@ -519,8 +529,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log(f"deleted {len(old)} old phase-mask files")
         cal, d = self.config.holo, self.spin_diam.value()
         spots_um = cal.to_um(self.spots, self.image.shape)
-        self.jobs = [(f"{prefix}{k + 1}", holo.mask_script(f"{prefix}{k + 1}", x, y, d),
-                      holo.mask_png(out_dir, f"{prefix}{k + 1}")) for k, (x, y) in enumerate(spots_um)]
+        names = [holo.mask_name(k + 1) for k in range(len(spots_um))]
+        self.jobs = [(name, holo.mask_script(name, x, y, d), holo.mask_png(out_dir, name))
+                     for name, (x, y) in zip(names, spots_um)]
         self.generation = {"spots_px": list(self.spots), "spots_um": spots_um, "diameter": d, "cal": cal,
                            "total": len(self.jobs)}
         self.btn_generate.setEnabled(False)
@@ -535,7 +546,7 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QMessageBox(
             QtWidgets.QMessageBox.Icon.Warning, "Old phase masks",
             f"{len(names)} old phase masks ({names[0]} … {names[-1]}) dated {dates} in\n"
-            f"{self.config.wfd_output_dir}\n\nPlerion counts every {self.config.wfd_profile_prefix}<n> there "
+            f"{self.config.wfd_output_dir}\n\nPlerion counts every {holo.PREFIX}<n> there "
             f"as a spot. Delete them before generating?", parent=self)
         b_delete = box.addButton("Delete them", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
         b_keep = box.addButton("Keep them", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
@@ -565,7 +576,7 @@ class MainWindow(QtWidgets.QMainWindow):
         waited = time.time() - self.job_t0
         if not self.job_taken:
             if self.client().busy:
-                if waited > self.config.wfd_timeout_s:
+                if waited > holo.TIMEOUT_S:
                     self._finish(f"Wavefront did not take the script within {waited:.0f} s: "
                                  f"is Wavefront IV running with script auto-load on?", "error")
                 return
@@ -576,11 +587,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._submit()
             else:
                 g = self.generation
-                rec = holo.write_spot_record(self.config.wfd_output_dir, self.config.wfd_profile_prefix,
-                                             g["spots_px"], g["spots_um"], g["diameter"], g["cal"])
+                rec = holo.write_spot_record(self.config.wfd_output_dir, g["spots_px"], g["spots_um"],
+                                             g["diameter"], g["cal"])
                 self._finish(f"{g['total']} phase masks saved in {self.config.wfd_output_dir} "
-                             f"(spot i = {self.config.wfd_profile_prefix}i; {rec.name})")
-        elif waited > self.config.wfd_timeout_s:
+                             f"(spot i = {holo.PREFIX}i; {rec.name})")
+        elif waited > holo.TIMEOUT_S:
             self._finish(f"{png.name} did not appear within {waited:.0f} s: is {png.parent} the folder "
                          f"Wavefront saves to?", "error")
 
@@ -621,6 +632,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log("shutter closed")
         except ShutterError as e:
             self.log(str(e), "error")
+        if not self.shutter.is_open:        # an output changed while open applies from now on
+            self.shutter = Shutter(self.config.nidaq_device, self.config.shutter_ao)
         self._show_shutter()
 
     def _show_shutter(self):
@@ -631,16 +644,28 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lbl_shutter.setText("Shutter closed")
             self.lbl_shutter.setStyleSheet(f"background: {BTN}; color: {TEXT}; padding: 4px;")
 
-    # ------------------------------------------------------------------ settings / exit
-    def open_settings(self):
-        dlg = SettingsDialog(self.config, self)
-        if dlg.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return
-        dlg.apply(self.config)
-        if not self.shutter.is_open:        # an open shutter keeps its channel until closed
-            self.shutter = Shutter(self.config.nidaq_device, self.config.shutter_ao, self.config.shutter_open_v)
+    # ------------------------------------------------------------------ settings boxes / exit
+    def _on_dmd(self, *_):
+        self.config.dmd_height, self.config.dmd_width = self.spin_rows.value(), self.spin_cols.value()
+        self.config.pixel_size_um = self.spin_dmd_px.value()
         self.save_config()
-        self.log("settings saved")
+
+    def _on_wavefront_dirs(self, *_):
+        self.config.wfd_script_dir = self.edit_script_dir.edit.text()
+        self.config.wfd_output_dir = self.edit_output_dir.edit.text()
+        self.save_config()
+        for d in (self.config.wfd_script_dir, self.config.wfd_output_dir):
+            if not Path(d).is_dir():
+                self.log(f"folder not found: {d}", "warn")
+
+    def _on_shutter_output(self, *_):
+        self.config.nidaq_device = self.edit_device.text().strip() or "Dev1"
+        self.config.shutter_ao = self.spin_ao.value()
+        self.save_config()
+        if self.shutter.is_open:            # an open shutter keeps its output until closed
+            self.log("the new shutter output applies once the shutter is closed", "warn")
+            return
+        self.shutter = Shutter(self.config.nidaq_device, self.config.shutter_ao)
 
     def closeEvent(self, ev):
         if self.shutter.is_open:

@@ -45,6 +45,8 @@ def test_config_keeps_calibrations_and_reads_legacy_aule(tmp_path, monkeypatch):
     monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", new)
     monkeypatch.setattr(config_mod, "LEGACY_CONFIG_PATH", legacy)
     legacy.parent.mkdir()
-    legacy.write_text(json.dumps({"rig_id": 2, "last_dir": "D:/data", "last_calibration": "old.json"}))
+    legacy.write_text(json.dumps({"rig_id": 2, "dmd_height": 768, "last_dir": "D:/data",
+                                  "last_calibration": "old.json", "wfd_profile_prefix": "X"}))
     cfg = config_mod.Config.load()                        # old keys are ignored
-    assert cfg.rig_id == 2 and cfg.last_dir == "D:/data" and cfg.path == str(new)
+    assert cfg.dmd_height == 768 and cfg.last_dir == "D:/data" and cfg.path == str(new)
+    assert not hasattr(cfg, "rig_id") and not hasattr(cfg, "wfd_profile_prefix")

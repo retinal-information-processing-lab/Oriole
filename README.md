@@ -29,12 +29,17 @@ The shutter needs `nidaqmx` and the NI-DAQmx driver; without them Oriole runs an
  Calibration           Load image…  Spot Ø  Undo  Clear       Calibration
   X  Y  rotation                                               X  Y  rotation
   stretch X / Y         left click: add a spot                 stretch X / Y
-                        right click on a spot: remove it      Manual
-                        (spots are numbered 1..N)              Load mask…  shutter Open / Close
+ DMD (MEA3)             right click on a spot: remove it      Manual
+  rows  columns         (spots are numbered 1..N)              Load mask…  shutter Open / Close
+  pixel size                                                  Wavefront & shutter
+                                                               script / phase mask folders
+                                                               shutter device + output
  EXTRACT BIN                                                  GENERATE PHASE MASKS
  Merge into bin…
  log ──────────────────────────────────────────────────────────────────────────────
 ```
+
+Every value typed in the window is saved at once in `~/.oriole/config.json`.
 
 **Calibration** (typed by hand, one per side, kept in `~/.oriole/config.json`). A camera pixel
 `p` of an image of W × H pixels goes to
@@ -44,13 +49,13 @@ The shutter needs `nidaqmx` and the NI-DAQmx driver; without them Oriole runs an
 the DHgui transform: the stretches are µm per camera pixel, a negative stretch mirrors.
 Holo default = `DHparams.m`: X 5, Y -8, rotation 0, stretch 0.67 / -0.67 (mirror y), sent to
 Wavefront in µm. Visual µm are relative to the DMD frame centre and divided by the DMD pixel
-size (2.5 µm, *Settings*). The bottom line under the image shows where the mouse falls in both.
+size (2.5 µm, *DMD* box). The bottom line under the image shows where the mouse falls in both.
 
 **Spot Ø** is the diameter of every spot, in µm on the sample.
 
 **EXTRACT BIN** writes `YYYY_MM_DD_<N>Frames.bin` (N = number of spots; `_2`, `_3`… if the name
-is taken) in the folder you pick: for spot i (from 1) frame `2(i-1)` is the spot and `2(i-1)+1`
-its negative. `<bin>.json` lists the spots (px, µm) and frame indices.
+is taken) in the folder you pick, for MEA3 (the only rig): for spot i (from 1) frame `2(i-1)` is
+the spot and `2(i-1)+1` its negative. `<bin>.json` lists the spots (px, µm) and frame indices.
 
 **Merge into bin…** asks for the linked bin, then where to save `<linked>_<spot bin>.bin`: the
 linked frames byte for byte, then the spot frames. Inputs are never modified;
@@ -59,14 +64,14 @@ linked frames byte for byte, then the spot frames. Inputs are never modified;
 **GENERATE PHASE MASKS** (Wavefront IV open with *script auto-load* on): one mask per spot,
 saved by Wavefront as `Pattern1_000.algoPhp.png` … `PatternN…` (the names Plerion counts).
 Old `Pattern<n>` files are reported first with their dates (YYYY MM DD), with the choice to
-delete them. Scripts are dropped as `test.js` + `zdone.js` (as DHgui and Plerion do), one at a
-time; `Pattern_spots.json` next to the masks says which spot each mask is.
+delete them. The `Pattern<n>` names are fixed (DHgui's format). Scripts are dropped as `test.js`
++ `zdone.js` (as DHgui and Plerion do), one at a time, each given up to 2 minutes;
+`Pattern_spots.json` next to the masks says which spot each mask is.
 
 **Manual**: *Load mask…* shows a saved mask on the SLM; *Open* / *Close* drive the shutter
-(NI-DAQ `Dev1/ao0`, 10 V open, as Plerion). Oriole only holds that output while the shutter is
-open and closes it on exit: close it before starting a Plerion protocol.
-
-**Settings…**: DMD rig / size / pixel size, Wavefront folders and mask name, shutter output.
+(NI-DAQ output from the *Wavefront & shutter* box, `Dev1/ao0` by default; 10 V = open, as
+Plerion). Oriole only holds that output while the shutter is open and closes it on exit: close
+it before starting a Plerion protocol.
 
 ## Layout
 

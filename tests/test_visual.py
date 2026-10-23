@@ -65,7 +65,7 @@ def test_merge_bin(config, tmp_path):
     small = tmp_path / "small"
     small.mkdir()
     tiny = write_spot_bin(small, [(5, 5)], (10, 10), 5.0, Calibration(),
-                          type(config)(rig_id=3, dmd_height=64, dmd_width=80))
+                          type(config)(dmd_height=64, dmd_width=80))
     with pytest.raises(ValueError, match="does not match"):
         merge_bin(linked, tiny, tmp_path / "never.bin")
     assert not (tmp_path / "never.bin").exists()

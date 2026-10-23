@@ -16,7 +16,13 @@ from .calibration import Calibration
 
 SCRIPT_NAME = "test.js"
 TRIGGER_NAME = "zdone.js"
+PREFIX = "Pattern"                   # DHgui names the mask of spot n Pattern<n> (what Plerion counts)
 MASK_SUFFIX = "_000.algoPhp.png"     # Wavefront saves profile <name> as <name>_000.algoPhp.png (+ siblings)
+TIMEOUT_S = 120.0                    # give up waiting for Wavefront after this long per script
+
+
+def mask_name(n: int) -> str:
+    return f"{PREFIX}{n}"
 
 
 # ----------------------------------------------------------------------------- scripts
@@ -45,12 +51,12 @@ def natural_key(path) -> list:
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", Path(path).name)]
 
 
-def old_masks(output_dir, prefix: str) -> list[Path]:
-    """Every file Wavefront wrote for profiles <prefix><n> (png, xml...): what Plerion counts as spots."""
+def old_masks(output_dir) -> list[Path]:
+    """Every file Wavefront wrote for profiles Pattern<n> (png, xml...): what Plerion counts as spots."""
     folder = Path(output_dir)
     if not folder.is_dir():
         return []
-    rx = re.compile(rf"^{re.escape(prefix)}\d+_000\.")
+    rx = re.compile(rf"^{PREFIX}\d+_000\.")
     return sorted((p for p in folder.iterdir() if p.is_file() and rx.match(p.name)), key=natural_key)
 
 
@@ -60,13 +66,12 @@ def date_range(paths) -> tuple[_dt.date, _dt.date] | None:
     return (min(dates), max(dates)) if dates else None
 
 
-def write_spot_record(output_dir, prefix: str, spots_px, spots_um, diameter_um: float,
-                      cal: Calibration) -> Path:
-    """``<prefix>_spots.json`` next to the masks: which spot each <prefix><n> mask is."""
-    path = Path(output_dir) / f"{prefix}_spots.json"
+def write_spot_record(output_dir, spots_px, spots_um, diameter_um: float, cal: Calibration) -> Path:
+    """``Pattern_spots.json`` next to the masks: which spot each Pattern<n> mask is."""
+    path = Path(output_dir) / f"{PREFIX}_spots.json"
     d = {"created": _dt.datetime.now().isoformat(timespec="seconds"), "diameter_um": diameter_um,
          "calibration": cal.to_dict(),
-         "masks": [{"mask": mask_png(output_dir, f"{prefix}{k + 1}").name, "x_px": float(p[0]),
+         "masks": [{"mask": mask_png(output_dir, mask_name(k + 1)).name, "x_px": float(p[0]),
                     "y_px": float(p[1]), "x_um": float(u[0]), "y_um": float(u[1])}
                    for k, (p, u) in enumerate(zip(spots_px, spots_um))]}
     path.write_text(json.dumps(d, indent=2))

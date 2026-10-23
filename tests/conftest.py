@@ -47,4 +47,4 @@ EXISTING_BIN = _lab_bin_or_synthetic(_LAB_BIN, "synthetic_reversing.bin", 1)
 
 @pytest.fixture
 def config():
-    return Config(rig_id=3, dmd_height=672, dmd_width=672, pixel_size_um=2.5)
+    return Config(dmd_height=672, dmd_width=672, pixel_size_um=2.5)

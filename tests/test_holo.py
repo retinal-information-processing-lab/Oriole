@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from oriole.calibration import HOLO_DEFAULT
-from oriole.holo import (WavefrontBusy, WavefrontClient, date_range, load_script, mask_png, mask_script,
-                         old_masks, write_spot_record)
+from oriole.holo import (WavefrontBusy, WavefrontClient, date_range, load_script, mask_name, mask_png,
+                         mask_script, old_masks, write_spot_record)
 
 DHGUI_SCRIPT = Path(__file__).resolve().parents[1] / "DHgui_20261022" / "scripts" / "test.js"
 
@@ -51,13 +51,14 @@ def test_old_masks_dates_and_record(tmp_path):
         (tmp_path / n).touch()
     t = datetime.datetime(2026, 10, 20, 12).timestamp()
     os.utime(tmp_path / "Pattern1_000.xml", (t, t))
-    old = old_masks(tmp_path, "Pattern")
+    old = old_masks(tmp_path)
     assert [p.name for p in old] == ["Pattern1_000.algoPhp.png", "Pattern1_000.xml", "Pattern2_000.slm.png",
                                      "Pattern12_000.algoPhp.png"]
     assert date_range(old) == (datetime.date(2026, 10, 20), datetime.date.today())
-    assert date_range([]) is None and old_masks(tmp_path / "missing", "Pattern") == []
-    assert mask_png(tmp_path, "Pattern4") == tmp_path / "Pattern4_000.algoPhp.png"
-    rec = write_spot_record(tmp_path, "Pattern", [(1, 2), (3, 4)], [(10.0, 20.0), (30.0, 40.0)], 12.0, HOLO_DEFAULT)
+    assert date_range([]) is None and old_masks(tmp_path / "missing") == []
+    assert mask_name(4) == "Pattern4"                       # DHgui: 'Pattern' int2str(num_frame)
+    assert mask_png(tmp_path, mask_name(4)) == tmp_path / "Pattern4_000.algoPhp.png"
+    rec = write_spot_record(tmp_path, [(1, 2), (3, 4)], [(10.0, 20.0), (30.0, 40.0)], 12.0, HOLO_DEFAULT)
     d = json.loads(rec.read_text())
     assert rec.name == "Pattern_spots.json" and d["diameter_um"] == 12.0
     assert [(m["mask"], m["x_um"]) for m in d["masks"]] == [("Pattern1_000.algoPhp.png", 10.0),

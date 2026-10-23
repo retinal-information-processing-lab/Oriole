@@ -14,7 +14,6 @@ LEGACY_CONFIG_PATH = Path.home() / ".aule" / "config.json"    # read once when t
 
 @dataclass
 class Config:
-    rig_id: int = 3
     dmd_height: int = 672          # rows of the frame array
     dmd_width: int = 672           # columns of the frame array
     pixel_size_um: float = 2.5     # size of one DMD frame pixel on the sample
@@ -25,11 +24,8 @@ class Config:
     linked_bin: str = ""           # last bin the spot bin was merged into
     wfd_script_dir: str = r"E:\wfdIV_20261022\script"                  # folder Wavefront IV watches
     wfd_output_dir: str = r"E:\wfdIV_20261022\GeneratedPhasemasks"     # where it saves the phase masks
-    wfd_profile_prefix: str = "Pattern"  # masks saved as <prefix><n>_000.algoPhp.png (what Plerion counts)
-    wfd_timeout_s: float = 120.0   # give up waiting for Wavefront after this long per script
     nidaq_device: str = "Dev1"     # NI-DAQ device driving the shutter (as in Plerion)
     shutter_ao: int = 0            # its analog output channel
-    shutter_open_v: float = 10.0   # voltage that opens the shutter; 0 V closes it
     path: str = field(default="", compare=False)   # where this config is saved (not serialised)
 
     @property

@@ -12,10 +12,11 @@ from pathlib import Path
 
 import numpy as np
 
-from .binfile import HEADER_BYTES, RIG_MAX_DIMS, BinFile, read_header
+from .binfile import HEADER_BYTES, BinFile, read_header
 from .calibration import Calibration
 from .config import Config
 
+RIG_ID = 3                  # MEA3, the only rig (polarity + flip applied when writing frames)
 MAX_FRAMES = 65535          # nb_images is a uint16 in the header
 
 
@@ -78,9 +79,9 @@ def write_spot_bin(directory, spots_px, image_shape, diameter_um: float, cal: Ca
             bf.append(m.astype(float))
             bf.append(1.0 - m)
 
-    _write_bin(out, w, h, config.rig_id, 2 * len(masks), write)
+    _write_bin(out, w, h, RIG_ID, 2 * len(masks), write)
     info = {"bin": out.name, "created": _dt.datetime.now().isoformat(timespec="seconds"),
-            "rig_id": config.rig_id, "dmd_shape": [h, w], "dmd_pixel_um": config.pixel_size_um,
+            "rig_id": RIG_ID, "dmd_shape": [h, w], "dmd_pixel_um": config.pixel_size_um,
             "diameter_um": diameter_um, "calibration": cal.to_dict(), "image_shape": list(image_shape[:2]),
             "spots": [{"spot": k + 1, "x_px": float(p[0]), "y_px": float(p[1]),
                        "x_um": float(u[0]), "y_um": float(u[1]), "pos_idx": 2 * k, "neg_idx": 2 * k + 1}
@@ -115,13 +116,12 @@ def merge_bin(linked_bin, spot_bin, out_bin) -> dict:
     if h0["nb_bits"] != 8 or h1["nb_bits"] != 8:
         raise ValueError("only 8-bit bins can be merged")
     n0 = h0["nb_images"]
-    rig = next(r for r, (mx, my) in RIG_MAX_DIMS.items() if h0["xsize"] <= mx and h0["ysize"] <= my)
 
-    def write(bf):              # byte copies only: the rig is just for BinFile's size checks
+    def write(bf):              # byte copies: no rig transform
         _copy_frames(linked_bin, h0, bf)
         _copy_frames(spot_bin, h1, bf)
 
-    _write_bin(out_bin, h0["xsize"], h0["ysize"], rig, n0 + h1["nb_images"], write)
+    _write_bin(out_bin, h0["xsize"], h0["ysize"], RIG_ID, n0 + h1["nb_images"], write)
     side = Path(str(spot_bin) + ".json")
     spots = json.loads(side.read_text())["spots"] if side.exists() else []
     mapping = {"output_bin": str(out_bin), "linked_bin": str(linked_bin), "spot_bin": str(spot_bin),
