@@ -35,6 +35,32 @@ ACTION_STYLE = """
 """
 EPI_SIZE = (672, 512)      # width, height of the epi camera images the calibrations are made for
 AUTOLOAD_HINT = 'check that "Tools → Script engine → auto load (script folder)" is selected in Wavefront'
+HELP_HTML = f"""
+<h3>Spots</h3>
+<p><b>Load image…</b> an epi image binned 2×2, {EPI_SIZE[0]} × {EPI_SIZE[1]} px (any other size: big red
+warning).<br>
+<b>Left click</b> adds a spot, <b>drag</b> a spot to move it, <b>right click</b> on a spot removes it.
+<b>Undo</b> / <b>Clear</b>. <b>Spot Ø</b> is the diameter of every spot on the sample (µm).</p>
+<h3>Calibrations (typed by hand, one per side)</h3>
+<p>µm = R(−rotation) · diag(stretch X, stretch Y) · (pixel + 0.5 − image centre) + (X, Y)<br>
+Stretches are µm per camera pixel; a negative stretch mirrors. Holo default = DHparams.m
+(X 5, Y −8, stretch 0.67 / −0.67). The line under the image shows the mouse in both.</p>
+<h3>Visual · DMD</h3>
+<p><b>EXTRACT BIN</b> writes <code>YYYY_MM_DD_&lt;N&gt;Frames.bin</code>: for spot i (from 1), frame 2(i−1) is the
+spot and 2(i−1)+1 its negative; a <code>.json</code> lists the frames.<br>
+<b>Merge into bin…</b> appends it to a linked bin (inputs untouched; <code>.indices.json</code> gives the
+new frame numbers).</p>
+<h3>Holo · SLM</h3>
+<p><b>Wavefront folder</b>: scripts go to its <code>script\\</code>, masks are read from its
+<code>GeneratedPhasemasks\\</code>; 🧹 sweeps a folder clean.<br>
+<b>GENERATE PHASE MASKS</b> empties the script folder, then has Wavefront save one mask per spot,
+<code>Pattern1…N</code>. It is <span style="color:#FFD700">yellow</span> and refuses while the phase mask folder
+holds masks: sweep it first. If Wavefront does not take a script within 10 s:
+Tools → Script engine → auto load (script folder).<br>
+<b>Manual</b>: pick a mask number and <b>Load</b> it onto the SLM; <b>Open</b> / <b>Close</b> the shutter
+(close it before a Plerion protocol).</p>
+<p>Everything typed is saved in <code>~/.oriole/config.json</code>.</p>
+"""
 BLOCKED_STYLE = ACTION_STYLE.replace("#1A4A1A", "#4A4A1A").replace("#00FF00", "#FFD700").replace("#2A6A2A", "#6A6A2A")
 
 
@@ -178,19 +204,33 @@ class CalibrationBox(QtWidgets.QGroupBox):
 
 
 class _ClickViewBox(pg.ViewBox):
+    """Fixed view (no pan, no zoom): clicks and left-button drags are passed on in image coordinates."""
+
     clicked = QtCore.pyqtSignal(float, float, bool)     # x, y, right button
+    dragged = QtCore.pyqtSignal(float, float, int)      # x, y, phase: 0 start (press point), 1 move, 2 end
 
     def __init__(self):
         super().__init__(lockAspect=True, invertY=True, enableMenu=False)
-        self.setMouseMode(pg.ViewBox.PanMode)
+        self.setMouseEnabled(x=False, y=False)
 
     def mouseClickEvent(self, ev):
         if ev.button() in (QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.RightButton):
             ev.accept()
             p = self.mapToView(ev.pos())
             self.clicked.emit(p.x(), p.y(), ev.button() == QtCore.Qt.MouseButton.RightButton)
+
+    def mouseDragEvent(self, ev, axis=None):
+        ev.accept()
+        if ev.button() != QtCore.Qt.MouseButton.LeftButton:
             return
-        super().mouseClickEvent(ev)
+        if ev.isStart():
+            p = self.mapToView(ev.buttonDownPos())
+            self.dragged.emit(p.x(), p.y(), 0)
+        p = self.mapToView(ev.pos())
+        self.dragged.emit(p.x(), p.y(), 2 if ev.isFinish() else 1)
+
+    def wheelEvent(self, ev, axis=None):
+        ev.ignore()
 
 
 class ImageView(pg.GraphicsLayoutWidget):
@@ -206,6 +246,7 @@ class ImageView(pg.GraphicsLayoutWidget):
         self.image_item = pg.ImageItem()
         self.vb.addItem(self.image_item)
         self.spot_item = pg.ScatterPlotItem(pxMode=False, symbol="o", pen=None, brush=pg.mkBrush(SPOT))
+        self.spot_item.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)     # clicks go to the view
         self.vb.addItem(self.spot_item)
         self.labels: list[pg.TextItem] = []
         self.scene().sigMouseMoved.connect(self._on_mouse)
@@ -228,6 +269,7 @@ class ImageView(pg.GraphicsLayoutWidget):
         for k, (x, y) in enumerate(pts):
             lbl = pg.TextItem(str(k + 1), color=SPOT, anchor=(0.5, 1.0))
             lbl.setFont(QtGui.QFont("Segoe UI", 11, QtGui.QFont.Weight.Bold))
+            lbl.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
             lbl.setPos(x, y - diameter_px / 2)
             self.vb.addItem(lbl)
             self.labels.append(lbl)
@@ -277,6 +319,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.image: np.ndarray | None = None
         self.spots: list[tuple[float, float]] = []      # camera px
         self.undo_stack: list[list[tuple[float, float]]] = []
+        self.dragging: int | None = None                # spot being dragged
+        self.help_dialog: QtWidgets.QDialog | None = None
         self.last_spot_bin: Path | None = None
         self.shutter = Shutter(config.nidaq_device, config.shutter_ao)
         self.jobs: list[tuple[str, str, Path]] = []      # phase masks still to compute
@@ -290,7 +334,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._build()
         self.redraw_spots()
         self.refresh_masks()
-        self.log("Oriole ready: load an image, click spots (right-click removes one).")
+        self.log("Oriole ready: load an image, click spots (drag to move, right-click removes; ? for help).")
 
     def _build(self):
         central = QtWidgets.QWidget()
@@ -355,9 +399,18 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addStretch(1)
         self.lbl_count = QtWidgets.QLabel()
         bar.addWidget(self.lbl_count)
+        self.btn_help = QtWidgets.QPushButton("?")
+        self.btn_help.setFixedSize(28, 28)
+        self.btn_help.setToolTip("Help")
+        self.btn_help.setStyleSheet(f"QPushButton {{ background: {ACCENT}; color: white; border-radius: 14px;"
+                                    f" padding: 0; font: bold 12pt 'Segoe UI'; }}"
+                                    f" QPushButton:hover {{ background: #3D82BF; }}")
+        self.btn_help.clicked.connect(self.show_help)
+        bar.addWidget(self.btn_help)
         mid.addLayout(bar)
         self.view = ImageView()
         self.view.vb.clicked.connect(self._on_click)
+        self.view.vb.dragged.connect(self._on_drag)
         self.view.mouseMoved.connect(self._on_mouse)
         self.view.show_placeholder()
         mid.addWidget(self.view, stretch=1)
@@ -467,6 +520,22 @@ class MainWindow(QtWidgets.QMainWindow):
             edit.setText(folder)            # cursor at the end: the sub-folder name stays visible
             edit.setToolTip(folder)
 
+    def show_help(self):
+        if self.help_dialog is None:
+            self.help_dialog = QtWidgets.QDialog(self)
+            self.help_dialog.setWindowTitle("Oriole help")
+            self.help_dialog.resize(620, 640)
+            layout = QtWidgets.QVBoxLayout(self.help_dialog)
+            text = QtWidgets.QTextBrowser()
+            text.setHtml(HELP_HTML)
+            text.setStyleSheet(f"background: {PANEL_BG}; color: {TEXT}; border: none; font: 10pt 'Segoe UI';")
+            layout.addWidget(text)
+            btn = QtWidgets.QPushButton("Close")
+            btn.clicked.connect(self.help_dialog.close)
+            layout.addWidget(btn)
+        self.help_dialog.show()
+        self.help_dialog.raise_()
+
     def log(self, text: str, level: str = "info"):
         self.log_view.appendHtml(f'<span style="color:{LOG_COLOURS[level]}">'
                                  f'{_dt.datetime.now():%H:%M:%S}  {html.escape(text)}</span>')
@@ -496,12 +565,16 @@ class MainWindow(QtWidgets.QMainWindow):
         h, w = self.image.shape
         self.log(f"image {Path(source).name or 'set'}: {w} x {h} px")
         if (w, h) != EPI_SIZE:
-            self.lbl_image_warning.setText(f"IMAGE IS {w} × {h} px\nNOT {EPI_SIZE[0]} × {EPI_SIZE[1]}\n"
-                                           f"the calibrations do not apply")
+            ew, eh = EPI_SIZE
+            self.lbl_image_warning.setText(f"WRONG IMAGE SIZE\n{w} × {h} px")
             self.lbl_image_warning.show()
-            self.log(f"WRONG IMAGE SIZE: {w} x {h} px instead of {EPI_SIZE[0]} x {EPI_SIZE[1]} (epi image); "
-                     f"the calibrations are made for {EPI_SIZE[0]} x {EPI_SIZE[1]} images, spot positions "
-                     f"will be wrong", "error")
+            if (w, h) == (2 * ew, 2 * eh):
+                why = "This is the unbinned camera size: the epi image was not binned 2x2"
+            else:
+                why = f"The epi image was probably not binned 2x2 (unbinned it would be {2 * ew} x {2 * eh})"
+            self.log(f"WRONG IMAGE SIZE: {w} x {h} px instead of {ew} x {eh}. {why}. Bin it 2x2 and load it "
+                     f"again: both calibrations are made for {ew} x {eh} epi images, so spot positions, sizes "
+                     f"and everything extracted or generated from this image would be wrong.", "error")
         else:
             self.lbl_image_warning.hide()
 
@@ -510,19 +583,42 @@ class MainWindow(QtWidgets.QMainWindow):
             self.log("load an image first", "warn")
             return
         if right:
-            if self.spots:
-                d = np.hypot(*(np.asarray(self.spots) - [x, y]).T)
-                k = int(d.argmin())
-                if d[k] <= max(self.diameter_px() / 2, 5):
-                    self._push_undo()
-                    del self.spots[k]
-                    self.redraw_spots()
+            k = self._spot_at(x, y)
+            if k is not None:
+                self._push_undo()
+                del self.spots[k]
+                self.redraw_spots()
             return
         h, w = self.image.shape
         if 0 <= x < w and 0 <= y < h:
             self._push_undo()
             self.spots.append((x, y))
             self.redraw_spots()
+
+    def _spot_at(self, x: float, y: float) -> int | None:
+        """Index of the spot under (x, y), if any."""
+        if not self.spots:
+            return None
+        d = np.hypot(*(np.asarray(self.spots) - [x, y]).T)
+        k = int(d.argmin())
+        return k if d[k] <= max(self.diameter_px() / 2, 5) else None
+
+    def _on_drag(self, x: float, y: float, phase: int):
+        """Drag a spot with the left button; dragging elsewhere does nothing (the view is fixed)."""
+        if self.image is None:
+            return
+        if phase == 0:
+            self.dragging = self._spot_at(x, y)
+            if self.dragging is not None:
+                self._push_undo()
+            return
+        if self.dragging is None:
+            return
+        h, w = self.image.shape
+        self.spots[self.dragging] = (min(max(x, 0.0), w - 1e-3), min(max(y, 0.0), h - 1e-3))
+        self.redraw_spots()
+        if phase == 2:
+            self.dragging = None
 
     def _push_undo(self):
         self.undo_stack.append(list(self.spots))
@@ -559,6 +655,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_mouse(self, x: float, y: float):
         if self.image is None:
             return
+        over_spot = self.dragging is not None or self._spot_at(x, y) is not None
+        self.view.setCursor(QtCore.Qt.CursorShape.OpenHandCursor if over_spot else QtCore.Qt.CursorShape.CrossCursor)
         vx, vy = self.config.visual.to_um([(x, y)], self.image.shape)[0]
         hx, hy = self.config.holo.to_um([(x, y)], self.image.shape)[0]
         self.lbl_mouse.setText(f"x {x:.0f}  y {y:.0f} px    |    visual {vx:.1f}, {vy:.1f} µm    |    "

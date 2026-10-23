@@ -54,8 +54,11 @@ size (2.5 µm, visual *Settings*). The line under the image shows where the mous
 
 **Spot Ø** is the diameter of every spot, in µm on the sample.
 
-The epi image is expected at **672 × 512 px** (width × height), the size the calibrations are made
-for: any other size gives a red error in the log and a big red banner above the holo calibration.
+The epi image is expected binned 2×2, at **672 × 512 px** (width × height), the size the
+calibrations are made for. Any other size gives a big red "WRONG IMAGE SIZE" banner above the holo
+calibration and a detailed red error in the log (usually: the image was not binned 2×2).
+
+The image is fixed (no pan, no zoom): **drag** a spot to move it; **?** at the top opens the help.
 
 **EXTRACT BIN** writes `YYYY_MM_DD_<N>Frames.bin` (N = number of spots; `_2`, `_3`… if the name
 is taken) in the folder you pick, for MEA3 (the only rig): for spot i (from 1) frame `2(i-1)` is

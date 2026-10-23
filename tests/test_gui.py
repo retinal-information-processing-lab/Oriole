@@ -10,7 +10,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pg = pytest.importorskip("pyqtgraph")
-from PyQt6 import QtGui, QtWidgets  # noqa: E402
+from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from oriole.binfile import read_header  # noqa: E402
 from oriole.config import Config  # noqa: E402
@@ -171,11 +171,73 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert json.loads((tmp_path / "cfg.json").read_text())["holo_cal"]["x_um"] == 6.0
 
 
+def test_fixed_view_drag_spots_and_help(window):
+    w = window
+    assert w.view.vb.state["mouseEnabled"] == [False, False]           # no pan, no zoom
+    w.set_image(np.zeros((512, 672), np.float32))
+    w._on_click(100.0, 100.0, False)
+    w._on_click(300.0, 200.0, False)
+    w._on_drag(101.0, 99.0, 0)                                          # press on spot 1, drag it
+    w._on_drag(150.0, 120.0, 1)
+    w._on_drag(160.0, 130.0, 2)
+    assert w.spots == [(160.0, 130.0), (300.0, 200.0)] and w.dragging is None
+    w.undo()
+    assert w.spots[0] == (100.0, 100.0)
+    for phase, (x, y) in enumerate(((500.0, 400.0), (510.0, 410.0), (520.0, 420.0))):
+        w._on_drag(x, y, phase)                                         # not on a spot: nothing moves
+    assert w.spots == [(100.0, 100.0), (300.0, 200.0)]
+    w._on_drag(300.0, 200.0, 0)
+    w._on_drag(-50.0, 900.0, 2)                                         # kept inside the image
+    assert w.spots[1][0] == 0.0 and w.spots[1][1] < 512
+    w.btn_help.click()
+    assert w.help_dialog.isVisible()
+    assert "Pattern1" in w.help_dialog.findChild(QtWidgets.QTextBrowser).toPlainText()
+
+
+def _mouse(w, kind, x, y, button, buttons=None):
+    """Send a real mouse event at image coordinates (x, y) to the image widget."""
+    view = w.view
+    pt = view.mapFromScene(view.vb.mapViewToScene(QtCore.QPointF(x, y)))
+    ev = QtGui.QMouseEvent(kind, QtCore.QPointF(pt), view.viewport().mapToGlobal(QtCore.QPointF(pt)), button,
+                           button if buttons is None else buttons, QtCore.Qt.KeyboardModifier.NoModifier)
+    QtWidgets.QApplication.sendEvent(view.viewport(), ev)
+
+
+def test_real_mouse_events_reach_the_spots(window):
+    w = window
+    w.set_image(np.zeros((512, 672), np.float32))
+    QtWidgets.QApplication.processEvents()
+    T, L, R = QtCore.QEvent.Type, QtCore.Qt.MouseButton.LeftButton, QtCore.Qt.MouseButton.RightButton
+    for x, y in ((200.0, 200.0), (400.0, 300.0)):
+        _mouse(w, T.MouseButtonPress, x, y, L)
+        _mouse(w, T.MouseButtonRelease, x, y, L, QtCore.Qt.MouseButton.NoButton)
+    assert len(w.spots) == 2
+    _mouse(w, T.MouseButtonPress, 200.0, 200.0, L)                      # drag spot 1 by the mouse
+    for x in (220.0, 250.0, 280.0):
+        _mouse(w, T.MouseMove, x, 210.0, QtCore.Qt.MouseButton.NoButton, L)
+    _mouse(w, T.MouseButtonRelease, 280.0, 210.0, L, QtCore.Qt.MouseButton.NoButton)
+    assert np.allclose(w.spots[0], (280.0, 210.0), atol=2) and len(w.spots) == 2
+    _mouse(w, T.MouseButtonPress, 400.0, 300.0, R)                      # right click on spot 2 removes it
+    _mouse(w, T.MouseButtonRelease, 400.0, 300.0, R, QtCore.Qt.MouseButton.NoButton)
+    assert len(w.spots) == 1
+    before = w.view.vb.viewRange()
+    _mouse(w, T.MouseButtonPress, 600.0, 450.0, L)                      # dragging the background: no pan
+    _mouse(w, T.MouseMove, 500.0, 350.0, QtCore.Qt.MouseButton.NoButton, L)
+    _mouse(w, T.MouseButtonRelease, 500.0, 350.0, L, QtCore.Qt.MouseButton.NoButton)
+    assert np.allclose(w.view.vb.viewRange(), before)
+
+
 def test_wrong_image_size_warns(window):
     w = window
+    log = w.log_view.toPlainText
+    w.set_image(np.zeros((1024, 1344), np.float32))        # unbinned camera image
+    assert not w.lbl_image_warning.isHidden()
+    assert w.lbl_image_warning.text() == "WRONG IMAGE SIZE\n1344 × 1024 px"          # short on the panel
+    assert "WRONG IMAGE SIZE: 1344 x 1024 px instead of 672 x 512" in log()        # detailed in the log
+    assert "unbinned camera size: the epi image was not binned 2x2" in log()
     w.set_image(np.zeros((672, 512), np.float32))          # rotated: 512 wide, 672 high
-    assert not w.lbl_image_warning.isHidden() and "512 × 672" in w.lbl_image_warning.text()
-    assert "WRONG IMAGE SIZE: 512 x 672 px instead of 672 x 512" in w.log_view.toPlainText()
+    assert "512 × 672" in w.lbl_image_warning.text()
+    assert "probably not binned 2x2 (unbinned it would be 1344 x 1024)" in log()
     w.set_image(np.zeros((512, 672), np.float32))          # 672 wide, 512 high: fine
     assert w.lbl_image_warning.isHidden()
 
