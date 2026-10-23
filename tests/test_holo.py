@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from oriole.calibration import HOLO_DEFAULT
-from oriole.holo import (WavefrontBusy, WavefrontClient, available_masks, date_range, load_script, mask_name,
-                         mask_png, mask_script, old_masks, write_spot_record)
+from oriole.holo import (WavefrontBusy, WavefrontClient, available_masks, date_range, empty_folder, load_script,
+                         mask_name, mask_png, mask_script, old_masks, write_spot_record)
 
 DHGUI_SCRIPT = Path(__file__).resolve().parents[1] / "DHgui_20261022" / "scripts" / "test.js"
 
@@ -44,6 +44,7 @@ def test_client_drops_script_then_trigger(tmp_path):
     (tmp_path / "test.js").write_text("left behind")
     (tmp_path / "sub").mkdir()
     assert client.purge() == ["test.js", "zdone.js"] and not client.busy and (tmp_path / "sub").is_dir()
+    assert empty_folder(tmp_path / "missing") == []
     with pytest.raises(FileNotFoundError):
         WavefrontClient(tmp_path / "missing").submit("x")
 

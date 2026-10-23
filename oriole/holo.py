@@ -69,6 +69,19 @@ def available_masks(output_dir) -> list[int]:
     return sorted(int(m.group(1)) for m in found if m)
 
 
+def empty_folder(folder) -> list[str]:
+    """Delete the files (not the sub-folders) of ``folder``; returns their names."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        return []
+    removed = []
+    for p in sorted(folder.iterdir(), key=natural_key):
+        if p.is_file():
+            p.unlink()
+            removed.append(p.name)
+    return removed
+
+
 def date_range(paths) -> tuple[_dt.date, _dt.date] | None:
     """Oldest and newest modification date of ``paths``."""
     dates = [_dt.date.fromtimestamp(Path(p).stat().st_mtime) for p in paths]
@@ -111,14 +124,7 @@ class WavefrontClient:
 
     def purge(self) -> list[str]:
         """Delete every file left in the script folder (Wavefront sometimes leaves a script behind)."""
-        if not self.script_dir.is_dir():
-            return []
-        removed = []
-        for p in sorted(self.script_dir.iterdir()):
-            if p.is_file():
-                p.unlink()
-                removed.append(p.name)
-        return removed
+        return empty_folder(self.script_dir)
 
     def submit(self, js: str):
         if not self.script_dir.is_dir():

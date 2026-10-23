@@ -166,9 +166,10 @@ class ImageView(pg.GraphicsLayoutWidget):
 
 
 class FolderEdit(QtWidgets.QWidget):
-    """Folder path (typed or picked with …); ``changed`` when it is edited."""
+    """Folder path (typed or picked with …) and a broom to empty it; ``changed`` when it is edited."""
 
     changed = QtCore.pyqtSignal(str)
+    purgeRequested = QtCore.pyqtSignal()
 
     def __init__(self, value: str, parent=None):
         super().__init__(parent)
@@ -181,8 +182,14 @@ class FolderEdit(QtWidgets.QWidget):
         btn.setFixedWidth(30)
         btn.setStyleSheet("padding: 4px 0;")
         btn.clicked.connect(self._browse)
+        self.btn_purge = QtWidgets.QPushButton("🧹")
+        self.btn_purge.setFixedWidth(30)
+        self.btn_purge.setStyleSheet("padding: 2px 0; font: 12pt 'Segoe UI Emoji';")
+        self.btn_purge.setToolTip("Sweep this folder clean (deletes its files)")
+        self.btn_purge.clicked.connect(self.purgeRequested)
         row.addWidget(self.edit, stretch=1)
         row.addWidget(btn)
+        row.addWidget(self.btn_purge)
 
     def _browse(self):
         folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Folder", self.edit.text())
@@ -299,10 +306,12 @@ class MainWindow(QtWidgets.QMainWindow):
         col.addWidget(QtWidgets.QLabel("script folder"))
         self.edit_script_dir = FolderEdit(self.config.wfd_script_dir)
         self.edit_script_dir.changed.connect(self._on_wavefront_dirs)
+        self.edit_script_dir.purgeRequested.connect(self.sweep_script_folder)
         col.addWidget(self.edit_script_dir)
         col.addWidget(QtWidgets.QLabel("phase mask folder"))
         self.edit_output_dir = FolderEdit(self.config.wfd_output_dir)
         self.edit_output_dir.changed.connect(self._on_wavefront_dirs)
+        self.edit_output_dir.purgeRequested.connect(self.sweep_mask_folder)
         col.addWidget(self.edit_output_dir)
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("shutter"))
@@ -526,6 +535,42 @@ class MainWindow(QtWidgets.QMainWindow):
         if removed:
             self.log(f"script folder purged ({', '.join(removed)} left there by Wavefront)", "warn")
         return True
+
+    def sweep_script_folder(self):
+        if self.jobs:
+            self.log("not now: Wavefront is computing masks from that folder", "warn")
+            return
+        try:
+            removed = self.client().purge()
+        except OSError as e:
+            self.log(f"cannot empty the script folder: {e}", "error")
+            return
+        self.log(f"🧹 script folder swept clean ({', '.join(removed)})" if removed else "🧹 script folder already clean")
+
+    def sweep_mask_folder(self):
+        if self.jobs:
+            self.log("not now: Wavefront is saving masks in that folder", "warn")
+            return
+        folder = Path(self.config.wfd_output_dir)
+        files = [p for p in folder.iterdir() if p.is_file()] if folder.is_dir() else []
+        if not files:
+            self.log("🧹 phase mask folder already clean")
+            return
+        first, last = holo.date_range(files)
+        dates = f"{first:%Y %m %d}" if first == last else f"{first:%Y %m %d} – {last:%Y %m %d}"
+        answer = QtWidgets.QMessageBox.question(
+            self, "Sweep the phase mask folder",
+            f"Delete the {len(files)} files ({len(holo.available_masks(folder))} masks, dated {dates}) in\n"
+            f"{folder}?")
+        if answer != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        try:
+            removed = holo.empty_folder(folder)
+        except OSError as e:
+            self.log(f"cannot empty {folder}: {e}", "error")
+        else:
+            self.log(f"🧹 phase mask folder swept clean ({len(removed)} files)")
+        self.refresh_masks()
 
     def refresh_masks(self):
         """Mask numbers found in the phase mask folder; Generate turns yellow while the folder holds masks."""

@@ -145,6 +145,19 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     monkeypatch.setattr("oriole.holo.NOT_READ_S", 0)
     w.check_load_taken()
     assert "Tools → Script engine → auto load (script folder)" in log()
+
+    # --- brooms: the script folder at once, the mask folder after a yes
+    w.edit_script_dir.btn_purge.click()
+    assert "script folder swept clean" in log() and not any(script_dir.iterdir())
+    w.edit_script_dir.btn_purge.click()
+    assert "script folder already clean" in log()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a, **k: QtWidgets.QMessageBox.StandardButton.No)
+    w.edit_output_dir.btn_purge.click()
+    assert w.combo_mask.count() == 2
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes)
+    w.edit_output_dir.btn_purge.click()
+    assert not any(out_dir.iterdir()) and w.combo_mask.count() == 0 and "#00FF00" in w.btn_generate.styleSheet()
+    assert "phase mask folder swept clean (3 files)" in log()
     w.btn_open.click()
     assert w.shutter.is_open and w.daq_log == ["new", 10.0] and "OPEN" in w.lbl_shutter.text()
     w.btn_close.click()
