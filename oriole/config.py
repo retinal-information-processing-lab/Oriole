@@ -6,7 +6,8 @@ import os
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 
-DEFAULT_CONFIG_PATH = Path.home() / ".aule" / "config.json"
+DEFAULT_CONFIG_PATH = Path.home() / ".oriole" / "config.json"
+LEGACY_CONFIG_PATH = Path.home() / ".aule" / "config.json"    # read once when the default is missing
 
 
 @dataclass
@@ -44,11 +45,15 @@ class Config:
         return path
 
     @classmethod
-    def load(cls, path: os.PathLike | str = DEFAULT_CONFIG_PATH) -> "Config":
-        path = Path(path)
-        if not path.exists():
+    def load(cls, path: os.PathLike | str | None = None) -> "Config":
+        """Load ``path`` (default location if None). The default falls back to the pre-rename ~/.aule file."""
+        path = Path(path or DEFAULT_CONFIG_PATH)
+        src = path
+        if not src.exists() and path == DEFAULT_CONFIG_PATH and LEGACY_CONFIG_PATH.exists():
+            src = LEGACY_CONFIG_PATH
+        if not src.exists():
             return cls(path=str(path))
-        with open(path) as f:
+        with open(src) as f:
             cfg = cls.from_dict(json.load(f))
         cfg.path = str(path)
         return cfg

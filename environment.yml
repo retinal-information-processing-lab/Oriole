@@ -1,8 +1,8 @@
-# Dedicated environment for Aule (modern stack: Python 3.14, numpy 2, Qt 6).
+# Dedicated environment for Oriole (modern stack: Python 3.14, numpy 2, Qt 6).
 #   conda env create -f environment.yml
-#   conda activate aule
-#   python -m aule gui
-name: aule
+#   conda activate oriole
+#   python -m oriole gui
+name: oriole
 channels:
   - conda-forge
   - nodefaults

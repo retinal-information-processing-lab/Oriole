@@ -2,8 +2,8 @@ import json
 import numpy as np
 import pytest
 
-from aule.binfile import BinFile, read_header
-from aule.calibration import (Calibration, fit_affine, apply_affine, make_calibration_bin,
+from oriole.binfile import BinFile, read_header
+from oriole.calibration import (Calibration, fit_affine, apply_affine, make_calibration_bin,
                                      target_mask, target_geometry, similarity_matrix,
                                      dmd_to_camera_matrix, decompose_similarity, refine_fit,
                                      template_signal, reference_image)
@@ -112,7 +112,7 @@ def test_make_calibration_bin(config, tmp_path):
 
 
 def test_config_roundtrip_keeps_path(tmp_path):
-    from aule.config import Config
+    from oriole.config import Config
     p = tmp_path / "cfg.json"
     cfg = Config.load(p)              # missing file -> defaults, remembers path
     assert cfg.path == str(p) and cfg.rig_id == 3 and cfg.calibration_max_age_days == 30
@@ -120,3 +120,18 @@ def test_config_roundtrip_keeps_path(tmp_path):
     cfg.save()                        # no argument -> same path
     cfg2 = Config.load(p)
     assert cfg2.pixel_size_um == 3.0 and "path" not in json.load(open(p))
+
+
+def test_config_falls_back_to_legacy_aule_dir(tmp_path, monkeypatch):
+    from oriole import config as config_mod
+    new, legacy = tmp_path / ".oriole" / "config.json", tmp_path / ".aule" / "config.json"
+    monkeypatch.setattr(config_mod, "DEFAULT_CONFIG_PATH", new)
+    monkeypatch.setattr(config_mod, "LEGACY_CONFIG_PATH", legacy)
+    legacy.parent.mkdir()
+    legacy.write_text(json.dumps({"rig_id": 2, "last_dir": "D:/data"}))
+    cfg = config_mod.Config.load()
+    assert cfg.rig_id == 2 and cfg.last_dir == "D:/data" and cfg.path == str(new)
+    cfg.save()                        # migrates: the next load reads the new file
+    assert new.exists() and config_mod.Config.load(new).rig_id == 2
+    other = tmp_path / "elsewhere.json"
+    assert config_mod.Config.load(other).rig_id == 3      # explicit paths never fall back

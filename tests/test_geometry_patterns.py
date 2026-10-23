@@ -2,10 +2,10 @@ import json
 import numpy as np
 import pytest
 
-from aule.calibration import Calibration
-from aule.geometry import (Circle, Polygon, rasterize_shape, rasterize_shapes,
+from oriole.calibration import Calibration
+from oriole.geometry import (Circle, Polygon, rasterize_shape, rasterize_shapes,
                                   simplify_polyline, shape_in_field, shape_from_dict)
-from aule.patterns import PatternSet, load_masks, pattern_stem
+from oriole.patterns import PatternSet, load_masks, pattern_stem
 
 
 def test_circle_rasterizes_to_expected_area(small_config):

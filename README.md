@@ -1,4 +1,4 @@
-# Aule — patterned OSS stimulation
+# Oriole — patterned OSS stimulation
 
 Desktop tool to turn a microscope image (epi / 2p, e.g. GFP cells) into DMD frames for
 patterned optogenetic stimulation, and to append those frames to an existing stimulus `.bin`.
@@ -7,18 +7,21 @@ For every drawn pattern the tool produces the **pattern frame** (light on the se
 to be shown with the activating LED) and its **negative** (light everywhere else, to be shown
 with the inactive LED) so that the total luminance is uniform over the retina.
 
+Formerly named **Aule**: on first start the settings in `~/.aule/config.json` are picked up and
+saved from then on to `~/.oriole/`.
+
 ## Install
 
-One-click launchers (they create the `aule` conda env from `environment.yml` on first
-use, then start the GUI detached, so no console stays open): double-click `Aule.bat` on
-Windows, run `./Aule.sh` on Linux (GUI output goes to `~/.aule/aule.log`). `Aule.desktop` can be copied to the desktop / `~/.local/share/applications` for a
+One-click launchers (they create the `oriole` conda env from `environment.yml` on first
+use, then start the GUI detached, so no console stays open): double-click `Oriole.bat` on
+Windows, run `./Oriole.sh` on Linux (GUI output goes to `~/.oriole/oriole.log`). `Oriole.desktop` can be copied to the desktop / `~/.local/share/applications` for a
 menu entry (its `Exec` / `Path` lines hold the absolute path of this folder: edit them if it moves).
 
 Manual install, dedicated conda environment (Python 3.14, numpy 2, PyQt6; Linux / Windows / macOS):
 
 ```
 conda env create -f environment.yml
-conda activate aule
+conda activate oriole
 ```
 
 Or with pip in any Python 3.11+ (virtualenv recommended):
@@ -30,15 +33,15 @@ pip install -r requirements.txt
 Run everything from this folder:
 
 ```
-python -m aule gui                 # the application
-python -m aule calib-bin --out calibration_target_MEA3.bin
-python -m aule merge --bin orig.bin --patterns cells.patterns.npz --out orig_cells.bin
-python -m aule info some.bin
+python -m oriole gui                      # the application
+python -m oriole calib-bin --out calibration_target_MEA3.bin
+python -m oriole merge --bin orig.bin --patterns cells.patterns.npz --out orig_cells.bin
+python -m oriole info some.bin
 python -m pytest tests                    # self-tests
 ```
 
 Rig defaults (rig 3, 672x672 frame, 2.5 µm/px) are editable in *Settings > Rig / DMD settings*
-and stored in `~/.aule/config.json` (or `--config` / `--rig` / `--dmd-size` / `--pixel-size`
+and stored in `~/.oriole/config.json` (or `--config` / `--rig` / `--dmd-size` / `--pixel-size`
 on the CLI).
 
 ## Workflow
@@ -50,7 +53,7 @@ calibration is shown at the top right of the Select tab (green = recent, orange 
 
 1. **Calibration** (tab *Calibration*)
    * Display frame 0 of the calibration bin (`calibration_target_MEA3.bin`, kept in the common
-     stimulus folder; *Export calibration bin* regenerates it, or `python -m aule calib-bin`).
+     stimulus folder; *Export calibration bin* regenerates it, or `python -m oriole calib-bin`).
      The target is a cross at the centre (centring), a ring (scale), a bar towards +x (rotation)
      and a dot in the upper-right quadrant (mirror check).
    * Image the projected target with the camera in the same configuration as the images used to
@@ -77,7 +80,7 @@ calibration is shown at the top right of the Select tab (green = recent, orange 
      `<name>.patterns.json` (shapes, calibration, image path; reloadable with *Load pattern set*)
      and `<name>_previews/` PNGs. Tick *combined* for one frame with all shapes and/or
      *per shape* for one frame per shape.
-   * Everything is autosaved to `~/.aule/autosave.patterns.json`.
+   * Everything is autosaved to `~/.oriole/autosave.patterns.json`.
 3. **Merge into bin** (GUI tab or CLI, usable on any number of bins with the exact same masks)
    * Pick the original bin, add one or more `.patterns.npz`, pick an output path.
    * The output is the original frames byte for byte, followed by `pos, neg` for each mask.
@@ -89,13 +92,13 @@ calibration is shown at the top right of the Select tab (green = recent, orange 
 
 * Frames are written through the same `BinFile.append` path as the grating stimuli (rig 3:
   polarity inverted then flipped horizontally), so a pattern mask value of 1 means light on.
-* `aule/binfile.py` is the lab reader/writer updated for numpy 2 (`np.float` and
+* `oriole/binfile.py` is the lab reader/writer updated for numpy 2 (`np.float` and
   `np.fromstring` were removed) with `read_frame_uint8()` to get back the logical frame.
 
 ## Layout
 
 ```
-aule/
+oriole/
   config.py       rig / DMD settings
   binfile.py      bin reader / writer (+ raw byte copy)
   calibration.py  calibration target, similarity fit / refinement, Calibration JSON

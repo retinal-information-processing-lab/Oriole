@@ -3,12 +3,12 @@ import shutil
 import numpy as np
 import pytest
 
-from aule.binfile import BinFile, read_header, read_raw_frame_bytes
-from aule.calibration import Calibration
-from aule.cli import main
-from aule.geometry import Circle
-from aule.merge import merge_bin, plan_merge
-from aule.patterns import PatternSet, load_masks
+from oriole.binfile import BinFile, read_header, read_raw_frame_bytes
+from oriole.calibration import Calibration
+from oriole.cli import main
+from oriole.geometry import Circle
+from oriole.merge import merge_bin, plan_merge
+from oriole.patterns import PatternSet, load_masks
 from tests.conftest import EXISTING_BIN, EXISTING_BIN_2
 
 

@@ -1,5 +1,5 @@
 @echo off
-title Aule - patterned OSS stimulation
+title Oriole - patterned OSS stimulation
 
 :: 1. Localisation de Conda
 set CONDA_PATH=%USERPROFILE%\anaconda3\Scripts\activate.bat
@@ -12,9 +12,9 @@ cd /d "%~dp0"
 
 :: 3. Activation de conda (base) puis creation de l'environnement au premier lancement
 call "%CONDA_PATH%"
-conda env list | findstr /B /C:"aule " >nul
+conda env list | findstr /B /C:"oriole " >nul
 if errorlevel 1 (
-    echo Environnement 'aule' introuvable : creation depuis environment.yml (quelques minutes)...
+    echo Environnement 'oriole' introuvable : creation depuis environment.yml (quelques minutes)...
     conda env create -f environment.yml -y
     if errorlevel 1 (
         echo La creation de l'environnement a echoue.
@@ -24,10 +24,10 @@ if errorlevel 1 (
 )
 
 :: 4. Activation de l'environnement
-call conda activate aule
+call conda activate oriole
 
 :: 5. Lancement DETACHE et silencieux (pythonw = pas de console noire)
-start "" pythonw -m aule gui
+start "" pythonw -m oriole gui
 
 :: 6. Fermeture immediate de la console
 exit
