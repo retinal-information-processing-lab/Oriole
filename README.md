@@ -10,8 +10,11 @@ Formerly named **Aule**: the settings in `~/.aule/config.json` are picked up on 
 
 ## Install / run
 
-Double-click `Oriole.bat` (Windows) or run `./Oriole.sh` (Linux): they create the `oriole` conda
-env from `environment.yml` on first use, then start the window. By hand:
+Windows: double-click **`Oriole.vbs`** (no console window at all; a desktop shortcut to it works
+too). It runs `Oriole.bat` hidden, which creates the `oriole` conda env from `environment.yml` on
+first use (the console is then shown, as it takes a few minutes) and starts the window.
+`Oriole.bat` also works on its own, with a console flashing at start. Linux: `./Oriole.sh`.
+By hand:
 
 ```
 conda env create -f environment.yml
