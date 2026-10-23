@@ -19,6 +19,7 @@ TRIGGER_NAME = "zdone.js"
 PREFIX = "Pattern"                   # DHgui names the mask of spot n Pattern<n> (what Plerion counts)
 MASK_SUFFIX = "_000.algoPhp.png"     # Wavefront saves profile <name> as <name>_000.algoPhp.png (+ siblings)
 TIMEOUT_S = 120.0                    # give up waiting for Wavefront after this long per script
+NOT_READ_S = 10.0                    # a script still there after this long: auto-load is probably off
 
 
 def mask_name(n: int) -> str:
@@ -60,6 +61,14 @@ def old_masks(output_dir) -> list[Path]:
     return sorted((p for p in folder.iterdir() if p.is_file() and rx.match(p.name)), key=natural_key)
 
 
+def available_masks(output_dir) -> list[int]:
+    """Numbers n of the Pattern<n>_000.algoPhp.png masks in the folder, in order."""
+    rx = re.compile(rf"^{PREFIX}(\d+){re.escape(MASK_SUFFIX)}$")
+    folder = Path(output_dir)
+    found = (rx.match(p.name) for p in folder.iterdir()) if folder.is_dir() else ()
+    return sorted(int(m.group(1)) for m in found if m)
+
+
 def date_range(paths) -> tuple[_dt.date, _dt.date] | None:
     """Oldest and newest modification date of ``paths``."""
     dates = [_dt.date.fromtimestamp(Path(p).stat().st_mtime) for p in paths]
@@ -99,6 +108,17 @@ class WavefrontClient:
 
     def done(self) -> bool:
         return not self.busy
+
+    def purge(self) -> list[str]:
+        """Delete every file left in the script folder (Wavefront sometimes leaves a script behind)."""
+        if not self.script_dir.is_dir():
+            return []
+        removed = []
+        for p in sorted(self.script_dir.iterdir()):
+            if p.is_file():
+                p.unlink()
+                removed.append(p.name)
+        return removed
 
     def submit(self, js: str):
         if not self.script_dir.is_dir():

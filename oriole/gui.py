@@ -31,6 +31,8 @@ ACTION_STYLE = """
     QPushButton:hover { background: #2A6A2A; }
     QPushButton:disabled { background: #3A3A3A; color: #666666; }
 """
+AUTOLOAD_HINT = 'check that "Tools → Script engine → auto load (script folder)" is selected in Wavefront'
+BLOCKED_STYLE = ACTION_STYLE.replace("#1A4A1A", "#4A4A1A").replace("#00FF00", "#FFD700").replace("#2A6A2A", "#6A6A2A")
 
 
 def apply_dark_theme(app: QtWidgets.QApplication):
@@ -206,6 +208,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shutter = Shutter(config.nidaq_device, config.shutter_ao)
         self.jobs: list[tuple[str, str, Path]] = []      # phase masks still to compute
         self.generation: dict | None = None
+        self._load_t0 = 0.0
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(100)
         self.timer.timeout.connect(self.poll)
@@ -213,6 +216,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resize(1500, 900)
         self._build()
         self.redraw_spots()
+        self.refresh_masks()
         self.log("Oriole ready: load an image, click spots (right-click removes one).")
 
     def _build(self):
@@ -225,10 +229,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # visual (DMD)
         left = QtWidgets.QVBoxLayout()
         left.addWidget(_title("VISUAL · DMD"))
-        self.visual_box = CalibrationBox(self.config.visual)
-        self.visual_box.changed.connect(self._on_calibration)
-        left.addWidget(self.visual_box)
-        dmd = QtWidgets.QGroupBox("DMD (MEA3)")
+        dmd = QtWidgets.QGroupBox("Settings")
         form = QtWidgets.QFormLayout(dmd)
         self.spin_rows = QtWidgets.QSpinBox()
         self.spin_cols = QtWidgets.QSpinBox()
@@ -247,6 +248,9 @@ class MainWindow(QtWidgets.QMainWindow):
         form.addRow("columns", self.spin_cols)
         form.addRow("pixel size", self.spin_dmd_px)
         left.addWidget(dmd)
+        self.visual_box = CalibrationBox(self.config.visual)
+        self.visual_box.changed.connect(self._on_calibration)
+        left.addWidget(self.visual_box)
         left.addStretch(1)
         self.btn_extract = _action_button("EXTRACT BIN")
         self.btn_extract.clicked.connect(self.extract)
@@ -290,25 +294,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # holo (SLM)
         right = QtWidgets.QVBoxLayout()
         right.addWidget(_title("HOLO · SLM"))
-        self.holo_box = CalibrationBox(self.config.holo)
-        self.holo_box.changed.connect(self._on_calibration)
-        right.addWidget(self.holo_box)
-        manual = QtWidgets.QGroupBox("Manual")
-        grid = QtWidgets.QGridLayout(manual)
-        self.btn_load_mask = QtWidgets.QPushButton("Load mask…")
-        self.btn_load_mask.clicked.connect(self.load_mask_dialog)
-        self.lbl_shutter = QtWidgets.QLabel()
-        self.lbl_shutter.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.btn_open = QtWidgets.QPushButton("Open")
-        self.btn_open.clicked.connect(self.open_shutter)
-        self.btn_close = QtWidgets.QPushButton("Close")
-        self.btn_close.clicked.connect(self.close_shutter)
-        grid.addWidget(self.btn_load_mask, 0, 0, 1, 2)
-        grid.addWidget(self.lbl_shutter, 1, 0, 1, 2)
-        grid.addWidget(self.btn_open, 2, 0)
-        grid.addWidget(self.btn_close, 2, 1)
-        right.addWidget(manual)
-        setup = QtWidgets.QGroupBox("Wavefront && shutter")
+        setup = QtWidgets.QGroupBox("Settings")
         col = QtWidgets.QVBoxLayout(setup)
         col.addWidget(QtWidgets.QLabel("script folder"))
         self.edit_script_dir = FolderEdit(self.config.wfd_script_dir)
@@ -331,12 +317,39 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.spin_ao)
         col.addLayout(row)
         right.addWidget(setup)
+        self.holo_box = CalibrationBox(self.config.holo)
+        self.holo_box.changed.connect(self._on_calibration)
+        right.addWidget(self.holo_box)
+        manual = QtWidgets.QGroupBox("Manual")
+        grid = QtWidgets.QGridLayout(manual)
+        grid.addWidget(QtWidgets.QLabel("mask"), 0, 0)
+        self.combo_mask = QtWidgets.QComboBox()
+        self.combo_mask.setToolTip("Pattern<n> masks found in the phase mask folder")
+        grid.addWidget(self.combo_mask, 0, 1)
+        self.btn_load_mask = QtWidgets.QPushButton("Load")
+        self.btn_load_mask.clicked.connect(self.load_selected_mask)
+        grid.addWidget(self.btn_load_mask, 0, 2)
+        self.lbl_shutter = QtWidgets.QLabel()
+        self.lbl_shutter.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.btn_open = QtWidgets.QPushButton("Open")
+        self.btn_open.clicked.connect(self.open_shutter)
+        self.btn_close = QtWidgets.QPushButton("Close")
+        self.btn_close.clicked.connect(self.close_shutter)
+        grid.addWidget(self.lbl_shutter, 1, 0, 1, 3)
+        shutter_row = QtWidgets.QHBoxLayout()
+        shutter_row.addWidget(self.btn_open)
+        shutter_row.addWidget(self.btn_close)
+        grid.addLayout(shutter_row, 2, 0, 1, 3)
+        right.addWidget(manual)
         right.addStretch(1)
         self.btn_generate = _action_button("GENERATE PHASE MASKS")
         self.btn_generate.clicked.connect(self.generate)
         right.addWidget(self.btn_generate)
         cols.addWidget(self._panel(right))
         self._show_shutter()
+        self.watcher = QtCore.QFileSystemWatcher(self)        # mask list and button follow the folder
+        self.watcher.directoryChanged.connect(lambda _: self.refresh_masks())
+        self._watch_output_dir()
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -504,29 +517,55 @@ class MainWindow(QtWidgets.QMainWindow):
     def client(self) -> holo.WavefrontClient:
         return holo.WavefrontClient(self.config.wfd_script_dir)
 
+    def _purge_scripts(self) -> bool:
+        try:
+            removed = self.client().purge()
+        except OSError as e:
+            self.log(f"cannot empty the script folder: {e}", "error")
+            return False
+        if removed:
+            self.log(f"script folder purged ({', '.join(removed)} left there by Wavefront)", "warn")
+        return True
+
+    def refresh_masks(self):
+        """Mask numbers found in the phase mask folder; Generate turns yellow while the folder holds masks."""
+        out_dir = self.config.wfd_output_dir
+        current = self.combo_mask.currentText()
+        self.combo_mask.clear()
+        self.combo_mask.addItems([str(n) for n in holo.available_masks(out_dir)])
+        if self.combo_mask.findText(current) >= 0:
+            self.combo_mask.setCurrentText(current)
+        self.btn_load_mask.setEnabled(self.combo_mask.count() > 0 and not self.jobs)
+        blocked = bool(holo.old_masks(out_dir))
+        self.btn_generate.setStyleSheet(BLOCKED_STYLE if blocked else ACTION_STYLE)
+        self.btn_generate.setToolTip("the phase mask folder is not empty" if blocked else "")
+
+    def _watch_output_dir(self):
+        if self.watcher.directories():
+            self.watcher.removePaths(self.watcher.directories())
+        if Path(self.config.wfd_output_dir).is_dir():
+            self.watcher.addPath(self.config.wfd_output_dir)
+
     def generate(self):
         if self.jobs:
             self.log("Wavefront is still computing the previous masks", "warn")
-            return
-        if not self._have_spots():
             return
         out_dir = Path(self.config.wfd_output_dir)
         if not out_dir.is_dir() or not self.client().script_dir.is_dir():
             self.log(f"Wavefront folders not found ({self.config.wfd_script_dir}, {out_dir})", "error")
             return
+        if not self._purge_scripts():
+            return
         old = holo.old_masks(out_dir)
         if old:
-            choice = self.ask_old_masks(old)
-            if choice == "cancel":
-                return
-            if choice == "delete":
-                try:
-                    for p in old:
-                        p.unlink()
-                except OSError as e:
-                    self.log(f"cannot delete old masks: {e}", "error")
-                    return
-                self.log(f"deleted {len(old)} old phase-mask files")
+            first, last = holo.date_range(old)
+            dates = f"{first:%Y %m %d}" if first == last else f"{first:%Y %m %d} – {last:%Y %m %d}"
+            names = sorted({p.name.split("_000.")[0] for p in old}, key=holo.natural_key)
+            self.log(f"not generating: the phase mask folder is not empty ({len(names)} masks, {names[0]} … "
+                     f"{names[-1]}, dated {dates}); empty {out_dir} first", "error")
+            return
+        if not self._have_spots():
+            return
         cal, d = self.config.holo, self.spin_diam.value()
         spots_um = cal.to_um(self.spots, self.image.shape)
         names = [holo.mask_name(k + 1) for k in range(len(spots_um))]
@@ -538,22 +577,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_load_mask.setEnabled(False)
         self._submit()
 
-    def ask_old_masks(self, old: list[Path]) -> str:
-        """'delete' | 'keep' | 'cancel'."""
-        first, last = holo.date_range(old)
-        dates = f"{first:%Y %m %d}" if first == last else f"{first:%Y %m %d} – {last:%Y %m %d}"
-        names = sorted({p.name.split("_000.")[0] for p in old}, key=holo.natural_key)
-        box = QtWidgets.QMessageBox(
-            QtWidgets.QMessageBox.Icon.Warning, "Old phase masks",
-            f"{len(names)} old phase masks ({names[0]} … {names[-1]}) dated {dates} in\n"
-            f"{self.config.wfd_output_dir}\n\nPlerion counts every {holo.PREFIX}<n> there "
-            f"as a spot. Delete them before generating?", parent=self)
-        b_delete = box.addButton("Delete them", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
-        b_keep = box.addButton("Keep them", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-        box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
-        box.exec()
-        return "delete" if box.clickedButton() is b_delete else "keep" if box.clickedButton() is b_keep else "cancel"
-
     def _submit(self):
         name, js, _ = self.jobs[0]
         try:
@@ -563,6 +586,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.job_t0 = time.time()
         self.job_taken = False
+        self.job_warned = False
         self.timer.start()
         self.log(f"Wavefront: computing {name} ({self.generation['total'] - len(self.jobs) + 1}/"
                  f"{self.generation['total']})")
@@ -577,8 +601,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.job_taken:
             if self.client().busy:
                 if waited > holo.TIMEOUT_S:
-                    self._finish(f"Wavefront did not take the script within {waited:.0f} s: "
-                                 f"is Wavefront IV running with script auto-load on?", "error")
+                    self._finish(f"Wavefront did not take the script within {waited:.0f} s; {AUTOLOAD_HINT}",
+                                 "error")
+                elif waited > holo.NOT_READ_S and not self.job_warned:
+                    self.job_warned = True
+                    self.log(f"the script is not being used by Wavefront: {AUTOLOAD_HINT}", "warn")
                 return
             self.job_taken = True
         if png.exists() and png.stat().st_mtime >= self.job_t0 - 1:
@@ -600,22 +627,30 @@ class MainWindow(QtWidgets.QMainWindow):
         self.jobs = []
         self.generation = None
         self.btn_generate.setEnabled(True)
-        self.btn_load_mask.setEnabled(True)
         self.log(message, level)
+        self.refresh_masks()
 
-    def load_mask_dialog(self):
-        path, _ = QtWidgets.QFileDialog.getOpenFileName(self, "Phase mask", self.config.wfd_output_dir,
-                                                        "Phase masks (*.algoPhp.png);;PNG (*.png)")
-        if path:
-            self.load_mask(path)
-
-    def load_mask(self, path):
-        try:
-            self.client().submit(holo.load_script(Path(path)))
-        except Exception as e:  # noqa: BLE001
-            self.log(f"cannot load the mask: {e}", "error")
+    def load_selected_mask(self):
+        if not self.combo_mask.currentText():
+            self.log(f"no {holo.PREFIX}<n> mask in {self.config.wfd_output_dir}", "warn")
             return
-        self.log(f"SLM: loading {Path(path).name}")
+        name = holo.mask_name(int(self.combo_mask.currentText()))
+        png = holo.mask_png(self.config.wfd_output_dir, name)
+        if not self._purge_scripts():
+            return
+        try:
+            self.client().submit(holo.load_script(png))
+        except Exception as e:  # noqa: BLE001
+            self.log(f"cannot load {name}: {e}", "error")
+            return
+        self.log(f"SLM: loading {name}")
+        self._load_t0 = time.time()
+        QtCore.QTimer.singleShot(int(holo.NOT_READ_S * 1000) + 100, self.check_load_taken)
+
+    def check_load_taken(self):
+        """A load script still in the folder after NOT_READ_S: Wavefront is not reading the folder."""
+        if self.client().busy and time.time() - self._load_t0 >= holo.NOT_READ_S:
+            self.log(f"the script is not being used by Wavefront: {AUTOLOAD_HINT}", "warn")
 
     # ------------------------------------------------------------------ shutter
     def open_shutter(self):
@@ -657,6 +692,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for d in (self.config.wfd_script_dir, self.config.wfd_output_dir):
             if not Path(d).is_dir():
                 self.log(f"folder not found: {d}", "warn")
+        self._watch_output_dir()
+        self.refresh_masks()
 
     def _on_shutter_output(self, *_):
         self.config.nidaq_device = self.edit_device.text().strip() or "Dev1"

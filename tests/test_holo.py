@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 
 from oriole.calibration import HOLO_DEFAULT
-from oriole.holo import (WavefrontBusy, WavefrontClient, date_range, load_script, mask_name, mask_png,
-                         mask_script, old_masks, write_spot_record)
+from oriole.holo import (WavefrontBusy, WavefrontClient, available_masks, date_range, load_script, mask_name,
+                         mask_png, mask_script, old_masks, write_spot_record)
 
 DHGUI_SCRIPT = Path(__file__).resolve().parents[1] / "DHgui_20261022" / "scripts" / "test.js"
 
@@ -41,6 +41,9 @@ def test_client_drops_script_then_trigger(tmp_path):
         client.submit("x")
     (tmp_path / "test.js").unlink()             # what Wavefront does once it ran the script
     assert client.done()
+    (tmp_path / "test.js").write_text("left behind")
+    (tmp_path / "sub").mkdir()
+    assert client.purge() == ["test.js", "zdone.js"] and not client.busy and (tmp_path / "sub").is_dir()
     with pytest.raises(FileNotFoundError):
         WavefrontClient(tmp_path / "missing").submit("x")
 
@@ -56,6 +59,7 @@ def test_old_masks_dates_and_record(tmp_path):
                                      "Pattern12_000.algoPhp.png"]
     assert date_range(old) == (datetime.date(2026, 10, 20), datetime.date.today())
     assert date_range([]) is None and old_masks(tmp_path / "missing") == []
+    assert available_masks(tmp_path) == [1, 12] and available_masks(tmp_path / "missing") == []
     assert mask_name(4) == "Pattern4"                       # DHgui: 'Pattern' int2str(num_frame)
     assert mask_png(tmp_path, mask_name(4)) == tmp_path / "Pattern4_000.algoPhp.png"
     rec = write_spot_record(tmp_path, [(1, 2), (3, 4)], [(10.0, 20.0), (30.0, 40.0)], 12.0, HOLO_DEFAULT)

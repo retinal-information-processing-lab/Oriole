@@ -108,16 +108,25 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert read_header(merged)["nb_images"] == 15 + 4 and w.config.linked_bin == str(linked)
     assert "spot 1 at frames 15/16" in log()
 
-    # --- holo: old masks reported and deleted, then one mask per spot
+    # --- holo: masks already in the phase mask folder turn Generate yellow and block it
     out_dir, script_dir = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir)
     old = out_dir / "Pattern7_000.algoPhp.png"
     old.write_bytes(b"old")
     t = datetime.datetime(2026, 10, 20, 9).timestamp()
     os.utime(old, (t, t))
-    asked = []
-    monkeypatch.setattr(w, "ask_old_masks", lambda files: asked.append([p.name for p in files]) or "delete")
+    w.refresh_masks()                                   # the folder watcher does this in the application
+    assert "#FFD700" in w.btn_generate.styleSheet() and w.combo_mask.currentText() == "7"
     w.generate()
-    assert asked == [["Pattern7_000.algoPhp.png"]] and not old.exists() and not w.btn_generate.isEnabled()
+    assert "phase mask folder is not empty" in log() and "2026 10 20" in log()
+    assert old.exists() and not (script_dir / "test.js").exists()
+    old.unlink()
+    w.refresh_masks()
+    assert "#00FF00" in w.btn_generate.styleSheet() and w.combo_mask.count() == 0
+
+    # --- a script left behind by Wavefront is purged first, then one mask per spot
+    (script_dir / "test.js").write_text("stale")
+    w.generate()
+    assert "script folder purged (test.js" in log() and not w.btn_generate.isEnabled()
     js1 = _simulate_wavefront(w)
     assert 'setProfileName("Pattern1");' in js1 and "drawSpot(19.4000,5.4000,10.0000);" in js1
     js2 = _simulate_wavefront(w)
@@ -125,13 +134,17 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert w.btn_generate.isEnabled() and "2 phase masks saved" in log()
     rec = json.loads((out_dir / "Pattern_spots.json").read_text())
     assert [m["mask"] for m in rec["masks"]] == ["Pattern1_000.algoPhp.png", "Pattern2_000.algoPhp.png"]
+    assert [w.combo_mask.itemText(i) for i in range(w.combo_mask.count())] == ["1", "2"]
+    assert "#FFD700" in w.btn_generate.styleSheet()     # the folder now holds masks
 
-    # --- manual: load a mask, shutter open / close; closing the window closes the shutter
-    monkeypatch.setattr(QtWidgets.QFileDialog, "getOpenFileName",
-                        staticmethod(lambda *a, **k: (str(out_dir / "Pattern2_000.algoPhp.png"), "")))
+    # --- manual: pick a mask number and load it; a warning if Wavefront does not take the script
+    w.combo_mask.setCurrentText("2")
     w.btn_load_mask.click()
     escaped = str(out_dir / "Pattern2_000.algoPhp.png").replace("\\", "\\\\")
     assert (script_dir / "test.js").read_text().endswith(f'loadProfile("{escaped}", 2);\n')
+    monkeypatch.setattr("oriole.holo.NOT_READ_S", 0)
+    w.check_load_taken()
+    assert "Tools → Script engine → auto load (script folder)" in log()
     w.btn_open.click()
     assert w.shutter.is_open and w.daq_log == ["new", 10.0] and "OPEN" in w.lbl_shutter.text()
     w.btn_close.click()
@@ -171,13 +184,18 @@ def test_failures_are_logged(window, monkeypatch):
     w.set_image(np.zeros((100, 100), np.float32))
     w._on_click(50.0, 50.0, False)
 
-    # Wavefront never takes the script: timeout, then the stale test.js blocks the next request
-    monkeypatch.setattr("oriole.holo.TIMEOUT_S", -1)
+    # Wavefront never takes the script: a warning after NOT_READ_S, an error at the timeout
+    monkeypatch.setattr("oriole.holo.NOT_READ_S", -1)
     w.generate()
     w.poll()
-    assert "auto-load" in log() and w.btn_generate.isEnabled()
+    assert "not being used by Wavefront" in log() and "auto load (script folder)" in log()
+    assert not w.btn_generate.isEnabled()
+    monkeypatch.setattr("oriole.holo.TIMEOUT_S", -1)
+    w.poll()
+    assert "did not take the script" in log() and w.btn_generate.isEnabled()
+    # the next Generate purges the script left behind and starts again
     w.generate()
-    assert "cannot send Pattern1" in log() and w.btn_generate.isEnabled()
+    assert "script folder purged (test.js, zdone.js" in log() and not w.btn_generate.isEnabled()
 
     # no NI-DAQ: the error is logged and the shutter stays closed
     def no_daq(device, ao):
