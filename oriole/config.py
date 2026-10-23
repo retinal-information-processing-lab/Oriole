@@ -1,10 +1,12 @@
-"""Rig configuration (DMD, Wavefront IV, shutter) shared by all modules."""
+"""Settings (DMD, Wavefront IV, shutter) and the two calibrations, kept in ~/.oriole/config.json."""
 from __future__ import annotations
 
 import json
 import os
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
+
+from .calibration import HOLO_DEFAULT, VISUAL_DEFAULT, Calibration
 
 DEFAULT_CONFIG_PATH = Path.home() / ".oriole" / "config.json"
 LEGACY_CONFIG_PATH = Path.home() / ".aule" / "config.json"    # read once when the default is missing
@@ -16,11 +18,11 @@ class Config:
     dmd_height: int = 672          # rows of the frame array
     dmd_width: int = 672           # columns of the frame array
     pixel_size_um: float = 2.5     # size of one DMD frame pixel on the sample
-    last_calibration: str = ""     # path of the last saved calibration JSON
-    calibration_max_age_days: int = 30   # warn in the GUI when the calibration is older
+    spot_diameter_um: float = 10.0
+    visual_cal: dict = field(default_factory=VISUAL_DEFAULT.to_dict)   # camera -> DMD µm
+    holo_cal: dict = field(default_factory=HOLO_DEFAULT.to_dict)       # camera -> Wavefront µm
     last_dir: str = ""             # last directory used in file dialogs
-    mode: str = "visual"           # "visual" (DMD frames) | "holo" (SLM phase masks)
-    last_holo_calibration: str = ""      # path of the last holo calibration JSON
+    linked_bin: str = ""           # last bin the spot bin was merged into
     wfd_script_dir: str = r"E:\wfdIV_20261022\script"                  # folder Wavefront IV watches
     wfd_output_dir: str = r"E:\wfdIV_20261022\GeneratedPhasemasks"     # where it saves the phase masks
     wfd_profile_prefix: str = "Pattern"  # masks saved as <prefix><n>_000.algoPhp.png (what Plerion counts)
@@ -33,6 +35,14 @@ class Config:
     @property
     def dmd_shape(self) -> tuple[int, int]:
         return (self.dmd_height, self.dmd_width)
+
+    @property
+    def visual(self) -> Calibration:
+        return Calibration.from_dict(self.visual_cal, VISUAL_DEFAULT)
+
+    @property
+    def holo(self) -> Calibration:
+        return Calibration.from_dict(self.holo_cal, HOLO_DEFAULT)
 
     def to_dict(self) -> dict:
         d = asdict(self)

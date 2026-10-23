@@ -27,7 +27,7 @@ if errorlevel 1 (
 call conda activate oriole
 
 :: 5. Lancement DETACHE et silencieux (pythonw = pas de console noire)
-start "" pythonw -m oriole gui
+start "" pythonw -m oriole
 
 :: 6. Fermeture immediate de la console
 exit

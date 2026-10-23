@@ -2,12 +2,9 @@
 #   python -m venv .venv && source .venv/bin/activate   (Windows: .venv\Scripts\activate)
 #   pip install -r requirements.txt
 numpy>=2
-scipy>=1.14
-scikit-image>=0.25
 tifffile
 imageio
 Pillow
-matplotlib
 PyQt6>=6.7
 pyqtgraph>=0.14
 nidaqmx            # holo shutter; optional at runtime, needs the NI-DAQmx driver on the rig

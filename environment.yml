@@ -1,7 +1,7 @@
 # Dedicated environment for Oriole (modern stack: Python 3.14, numpy 2, Qt 6).
 #   conda env create -f environment.yml
 #   conda activate oriole
-#   python -m oriole gui
+#   python -m oriole
 name: oriole
 channels:
   - conda-forge
@@ -9,12 +9,9 @@ channels:
 dependencies:
   - python=3.14
   - numpy>=2
-  - scipy>=1.14
-  - scikit-image>=0.25
   - tifffile
   - imageio
   - pillow
-  - matplotlib-base
   - pyqt6>=6.7
   - pyqtgraph>=0.14
   - pytest

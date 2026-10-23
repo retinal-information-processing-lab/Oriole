@@ -20,5 +20,5 @@ fi
 
 conda activate oriole
 mkdir -p "$HOME/.oriole"
-setsid python -m oriole gui "$@" > "$HOME/.oriole/oriole.log" 2>&1 < /dev/null &
+setsid python -m oriole > "$HOME/.oriole/oriole.log" 2>&1 < /dev/null &
 disown

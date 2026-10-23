@@ -1,56 +1,64 @@
+import datetime
 import json
+import os
+from pathlib import Path
 
-import numpy as np
 import pytest
 
-from oriole.geometry import Circle, Polygon
-from oriole.holo import HoloCalibration, HoloSpot, holo_spots, write_holo_record
+from oriole.calibration import HOLO_DEFAULT
+from oriole.holo import (WavefrontBusy, WavefrontClient, date_range, load_script, mask_png, mask_script,
+                         old_masks, write_spot_record)
+
+DHGUI_SCRIPT = Path(__file__).resolve().parents[1] / "DHgui_20261022" / "scripts" / "test.js"
 
 
-def test_camera_to_slm_matches_dhgui_by_hand():
-    cal = HoloCalibration()                     # DHparams.m: 0.67 µm/px, ΔX 5, ΔY -8, θ 0, mirror y
-    # click on the centre of pixel (69, 29) = MATLAB pixel (70, 30); 100x100 image -> u = 20, v = -(30 - 50) = 20
-    np.testing.assert_allclose(cal.camera_to_slm([(69.5, 29.5)], (100, 100)), [[13.4 + 5, 13.4 - 8]])
-    cal.theta_deg = 90                          # R(-90°) (20, 20) -> (20, -20)
-    np.testing.assert_allclose(cal.camera_to_slm([(69.5, 29.5)], (100, 100)), [[13.4 + 5, -13.4 - 8]], atol=1e-12)
-    cal.theta_deg, cal.flip_y, cal.flip_x = 0, False, True
-    np.testing.assert_allclose(cal.camera_to_slm([(69.5, 29.5)], (100, 100)), [[-13.4 + 5, -13.4 - 8]])
+def test_mask_script_has_dhgui_layout():
+    js = mask_script("Pattern56", -41.0276, 76.1798, 10)
+    assert js.splitlines() == [
+        "cleanAllBlob();", "selectTool(2);", 'setProfileName("Pattern56");', "selectTool(2);",
+        "setIntensity(1);", "drawSpot(-41.0276,76.1798,10.0000);", "proceedPhp();",
+        "var date = new Date();", "var curDate = null;", "do { curDate = new Date(); }",
+        "while(curDate-date < 1000);", "saveProfile(0);", "deleteProfile(0);"]
+    if DHGUI_SCRIPT.exists():           # MATLAB reference (2 spots at intensity 0.5): same structure
+        ref = [l for l in DHGUI_SCRIPT.read_text().splitlines() if not l.startswith(("setIntensity", "drawSpot"))]
+        assert ref == [l for l in js.splitlines() if not l.startswith(("setIntensity", "drawSpot"))]
 
 
-def test_slm_to_camera_inverts():
-    cal = HoloCalibration(pixel_size_um=0.5, delta_x_um=-3, delta_y_um=12, theta_deg=17, flip_x=True)
-    pts = np.random.default_rng(0).uniform(0, 500, (20, 2))
-    np.testing.assert_allclose(cal.slm_to_camera(cal.camera_to_slm(pts, (480, 640)), (480, 640)), pts)
-    assert cal.um_to_camera_px(cal.camera_px_to_um(7.0)) == pytest.approx(7.0)
+def test_load_script_is_plerions():
+    assert load_script(r"E:\wfdIV\GeneratedPhasemasks\Pattern2_000.algoPhp.png") == (
+        'cleanAllBlob();\ndeleteProfile(0);\n'
+        'loadProfile("E:\\\\wfdIV\\\\GeneratedPhasemasks\\\\Pattern2_000.algoPhp.png", 2);\n')
 
 
-def test_json_roundtrip(tmp_path):
-    cal = HoloCalibration(pixel_size_um=0.71, delta_x_um=1.5, theta_deg=-2, flip_x=True)
-    p = cal.save(tmp_path / "holo.json")
-    assert cal.created and "path" not in json.load(open(p))
-    back = HoloCalibration.load(p)
-    assert back == cal and back.path == str(p) and "today" in back.created_text()
-    assert "0.71 µm/px" in back.summary() and "mirror x+y" in back.summary()
+def test_client_drops_script_then_trigger(tmp_path):
+    client = WavefrontClient(tmp_path)
+    assert client.done()
+    client.submit("cleanAllBlob();\n")
+    assert (tmp_path / "test.js").read_text() == "cleanAllBlob();\n"
+    assert (tmp_path / "zdone.js").exists() and not (tmp_path / "test.js.part").exists()
+    assert client.busy
+    with pytest.raises(WavefrontBusy, match="auto-load"):
+        client.submit("x")
+    (tmp_path / "test.js").unlink()             # what Wavefront does once it ran the script
+    assert client.done()
+    with pytest.raises(FileNotFoundError):
+        WavefrontClient(tmp_path / "missing").submit("x")
 
 
-def test_holo_spots_keep_enabled_circles():
-    cal = HoloCalibration(pixel_size_um=0.5)
-    shapes = [Circle(50, 50, 10, name="S1"), Circle(10, 10, 4, name="S2", enabled=False),
-              Polygon([[0, 0], [5, 0], [0, 5]], name="S3"), Circle(20, 70, 6, name="S4")]
-    spots = holo_spots(shapes, cal, (100, 100))
-    assert [s.name for s in spots] == ["S1", "S4"]
-    assert spots[0].d_um == pytest.approx(10.0) and spots[1].d_um == pytest.approx(6.0)
-    np.testing.assert_allclose([spots[1].x_um, spots[1].y_um], cal.camera_to_slm([(20, 70)], (100, 100))[0])
-    assert (spots[1].cx, spots[1].cy) == (20, 70)
-    assert holo_spots([], cal, (100, 100)) == []
-
-
-def test_write_holo_record(tmp_path):
-    cal = HoloCalibration()
-    spots = [HoloSpot("S1", 1.0, 2.0, 10.0, 3.0, 4.0)]
-    masks = [{"profile": "Pattern1", "spot": "S1", "png": "x/Pattern1_000.algoPhp.png", "exists": True}]
-    p = write_holo_record(tmp_path, "my set", spots, cal, "img.tif", (480, 640, 3), masks)
-    assert p.name == "my_set.holo.json"
-    d = json.load(open(p))
-    assert d["spots"][0] == {"name": "S1", "x_um": 1.0, "y_um": 2.0, "d_um": 10.0, "cx": 3.0, "cy": 4.0}
-    assert d["image_shape"] == [480, 640] and d["masks"] == masks and d["calibration"]["delta_y_um"] == -8.0
+def test_old_masks_dates_and_record(tmp_path):
+    for n in ["Pattern1_000.algoPhp.png", "Pattern1_000.xml", "Pattern12_000.algoPhp.png", "Pattern2_000.slm.png",
+              "PatternAll_000.algoPhp.png", "Pattern_spots.json", "Pattern3.txt"]:
+        (tmp_path / n).touch()
+    t = datetime.datetime(2026, 10, 20, 12).timestamp()
+    os.utime(tmp_path / "Pattern1_000.xml", (t, t))
+    old = old_masks(tmp_path, "Pattern")
+    assert [p.name for p in old] == ["Pattern1_000.algoPhp.png", "Pattern1_000.xml", "Pattern2_000.slm.png",
+                                     "Pattern12_000.algoPhp.png"]
+    assert date_range(old) == (datetime.date(2026, 10, 20), datetime.date.today())
+    assert date_range([]) is None and old_masks(tmp_path / "missing", "Pattern") == []
+    assert mask_png(tmp_path, "Pattern4") == tmp_path / "Pattern4_000.algoPhp.png"
+    rec = write_spot_record(tmp_path, "Pattern", [(1, 2), (3, 4)], [(10.0, 20.0), (30.0, 40.0)], 12.0, HOLO_DEFAULT)
+    d = json.loads(rec.read_text())
+    assert rec.name == "Pattern_spots.json" and d["diameter_um"] == 12.0
+    assert [(m["mask"], m["x_um"]) for m in d["masks"]] == [("Pattern1_000.algoPhp.png", 10.0),
+                                                            ("Pattern2_000.algoPhp.png", 30.0)]
