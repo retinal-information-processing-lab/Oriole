@@ -2,7 +2,7 @@
 Version=1.0
 Type=Application
 Name=Oriole
-Comment=Patterned OSS stimulation (DMD patterns from microscope images)
+Comment=Visual (DMD) and holographic (SLM) stimulation patterns from microscope images
 Exec=bash "/home/guiglaz/Documents/Aule - OSS patterned stimulation/Oriole.sh"
 Path=/home/guiglaz/Documents/Aule - OSS patterned stimulation/
 Icon=utilities-terminal

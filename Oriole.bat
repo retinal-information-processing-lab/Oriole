@@ -1,5 +1,5 @@
 @echo off
-title Oriole - patterned OSS stimulation
+title Oriole - visual and holographic pattern generation
 
 :: 1. Localisation de Conda
 set CONDA_PATH=%USERPROFILE%\anaconda3\Scripts\activate.bat

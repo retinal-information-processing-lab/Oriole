@@ -14,6 +14,7 @@ PEN_SELECTED = pg.mkPen((0, 255, 255), width=3)
 PEN_DISABLED = pg.mkPen((150, 150, 150), width=1, style=QtCore.Qt.PenStyle.DashLine)
 PEN_FIELD = pg.mkPen((0, 200, 255), width=1, style=QtCore.Qt.PenStyle.DashLine)
 PEN_STROKE = pg.mkPen((255, 120, 0), width=2)
+PEN_ORIGIN = pg.mkPen((255, 0, 255), width=2)
 HOVER_PEN = pg.mkPen((255, 255, 255), width=2)
 
 
@@ -162,6 +163,9 @@ class ImageCanvas(QtWidgets.QWidget):
         self.field_item = pg.PlotCurveItem(pen=PEN_FIELD)
         self.field_item.setZValue(5)
         self.vb.addItem(self.field_item)
+        self.origin_item = pg.ScatterPlotItem(symbol="+", size=22, pen=PEN_ORIGIN, brush=None, pxMode=True)
+        self.origin_item.setZValue(6)
+        self.vb.addItem(self.origin_item)
         self.stroke_item = pg.PlotCurveItem(pen=PEN_STROKE)
         self.stroke_item.setZValue(15)
         self.vb.addItem(self.stroke_item)
@@ -202,6 +206,13 @@ class ImageCanvas(QtWidgets.QWidget):
             return
         c = np.vstack([corners, corners[:1]])
         self.field_item.setData(c[:, 0], c[:, 1])
+
+    def set_origin_marker(self, pt):
+        """Cross at ``pt`` (x, y) in image coords, e.g. where the SLM zero order lands; None hides it."""
+        if pt is None:
+            self.origin_item.setData([], [])
+        else:
+            self.origin_item.setData([float(pt[0])], [float(pt[1])])
 
     def _on_stroke(self, pts):
         arr = np.asarray(pts)

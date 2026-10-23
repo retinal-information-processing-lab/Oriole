@@ -294,8 +294,38 @@ def refine_fit(image: np.ndarray, params: dict, config: Config) -> dict:
 
 
 # ----------------------------------------------------------------------------- Calibration
+class DatedMixin:
+    """Date helpers for calibrations with an ISO ``created`` field."""
+    created: str
+
+    @property
+    def created_datetime(self) -> _dt.datetime | None:
+        try:
+            return _dt.datetime.fromisoformat(self.created)
+        except (TypeError, ValueError):
+            return None
+
+    @property
+    def age_days(self) -> float | None:
+        d = self.created_datetime
+        return None if d is None else (_dt.datetime.now() - d).total_seconds() / 86400
+
+    def created_text(self) -> str:
+        d = self.created_datetime
+        if d is None:
+            return self.created or "unknown date"
+        age = self.age_days
+        if age < 1:
+            when = "today"
+        elif age < 2:
+            when = "yesterday"
+        else:
+            when = f"{int(age)} days ago"
+        return f"{d:%Y-%m-%d %H:%M} ({when})"
+
+
 @dataclass
-class Calibration:
+class Calibration(DatedMixin):
     matrix: np.ndarray                      # camera -> DMD, 3x3
     method: str = "template"                # "template" | "points" | "identity"
     fit: dict = field(default_factory=dict)  # template placement (center_camera, scale, angle_deg, mirror, signal)
@@ -343,32 +373,6 @@ class Calibration:
 
     def similarity_params(self) -> dict:
         return decompose_similarity(self.matrix, self.dmd_shape)
-
-    # -- date helpers -------------------------------------------------------
-    @property
-    def created_datetime(self) -> _dt.datetime | None:
-        try:
-            return _dt.datetime.fromisoformat(self.created)
-        except (TypeError, ValueError):
-            return None
-
-    @property
-    def age_days(self) -> float | None:
-        d = self.created_datetime
-        return None if d is None else (_dt.datetime.now() - d).total_seconds() / 86400
-
-    def created_text(self) -> str:
-        d = self.created_datetime
-        if d is None:
-            return self.created or "unknown date"
-        age = self.age_days
-        if age < 1:
-            when = "today"
-        elif age < 2:
-            when = "yesterday"
-        else:
-            when = f"{int(age)} days ago"
-        return f"{d:%Y-%m-%d %H:%M} ({when})"
 
     # -- constructors ---------------------------------------------------------
     @classmethod

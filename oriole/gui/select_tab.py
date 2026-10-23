@@ -1,4 +1,8 @@
-"""Select tab: draw circles / freehand outlines on the microscope image, preview, export."""
+"""Select tab: draw spots / freehand outlines on the microscope image; DMD frames or SLM phase masks.
+
+The spots are shared by both modes; the mode picks the calibration and the output panel
+(visual: DMD preview + export, holo: Wavefront coordinates, phase masks, shutter).
+"""
 from __future__ import annotations
 
 import copy
@@ -11,8 +15,11 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from ..calibration import Calibration
 from ..config import Config
 from ..geometry import Circle, Polygon, shape_from_dict, shape_in_field
+from ..holo import HoloCalibration, holo_spots
 from ..images import load_image, warp_to_dmd, to_uint8
 from ..patterns import PatternSet
+from .hardware import ShutterController, WavefrontRunner
+from .holo_panel import HoloPanel
 from .image_view import ImageCanvas, ShapeItem, stroke_to_polygon
 
 AUTOSAVE_PATH = Path.home() / ".oriole" / "autosave.patterns.json"
@@ -22,10 +29,14 @@ class SelectTab(QtWidgets.QWidget):
     status = QtCore.pyqtSignal(str)
     calibrationTabRequested = QtCore.pyqtSignal()
 
-    def __init__(self, config: Config, parent=None):
+    def __init__(self, config: Config, runner: WavefrontRunner, shutter: ShutterController, parent=None):
         super().__init__(parent)
         self.config = config
+        self.runner = runner
+        self.shutter = shutter
+        self.stim_mode = "visual"
         self.calibration: Calibration | None = None
+        self.holo_calibration: HoloCalibration | None = None
         self.pattern = PatternSet(config=config)
         self.items: list[ShapeItem] = []
         self.selected: ShapeItem | None = None
@@ -68,14 +79,14 @@ class SelectTab(QtWidgets.QWidget):
             a.triggered.connect(lambda _=False, m=mode: self.set_mode(m))
         tb.addSeparator()
 
-        tb.addWidget(QtWidgets.QLabel(" radius (µm) "))
-        self.spin_radius = QtWidgets.QDoubleSpinBox()
-        self.spin_radius.setRange(0.5, 1000)
-        self.spin_radius.setValue(8.0)
-        self.spin_radius.setDecimals(1)
-        self.spin_radius.setSingleStep(1.0)
-        self.spin_radius.valueChanged.connect(self._on_radius_changed)
-        tb.addWidget(self.spin_radius)
+        tb.addWidget(QtWidgets.QLabel(" spot Ø (µm) "))
+        self.spin_diam = QtWidgets.QDoubleSpinBox()
+        self.spin_diam.setRange(1.0, 2000)
+        self.spin_diam.setValue(10.0)
+        self.spin_diam.setDecimals(1)
+        self.spin_diam.setSingleStep(1.0)
+        self.spin_diam.valueChanged.connect(self._on_diameter_changed)
+        tb.addWidget(self.spin_diam)
         tb.addWidget(QtWidgets.QLabel(" margin (µm) "))
         self.spin_margin = QtWidgets.QDoubleSpinBox()
         self.spin_margin.setRange(0, 200)
@@ -124,13 +135,24 @@ class SelectTab(QtWidgets.QWidget):
         self.list.itemChanged.connect(self._on_list_item_changed)
         right.addWidget(self.list, stretch=2)
 
-        right.addWidget(QtWidgets.QLabel("<b>DMD frame preview</b>"))
+        # mode-specific output: page 0 visual (DMD), page 1 holo (SLM)
+        self.stack = QtWidgets.QStackedWidget()
+        right.addWidget(self.stack, stretch=3)
+        page = QtWidgets.QWidget()
+        visual = QtWidgets.QVBoxLayout(page)
+        visual.setContentsMargins(0, 0, 0, 0)
+        self.stack.addWidget(page)
+        self.holo_panel = HoloPanel(self.config, self.runner, self.shutter)
+        self.holo_panel.status.connect(self.status)
+        self.stack.addWidget(self.holo_panel)
+
+        visual.addWidget(QtWidgets.QLabel("<b>DMD frame preview</b>"))
         self.preview = pg.GraphicsLayoutWidget()
         self.preview.setFixedHeight(240)
         self.preview_vb = self.preview.addViewBox(lockAspect=True, invertY=True)
         self.preview_item = pg.ImageItem()
         self.preview_vb.addItem(self.preview_item)
-        right.addWidget(self.preview)
+        visual.addWidget(self.preview)
         prow = QtWidgets.QHBoxLayout()
         self.chk_neg = QtWidgets.QCheckBox("show negative")
         self.chk_neg.toggled.connect(self.update_preview)
@@ -139,10 +161,10 @@ class SelectTab(QtWidgets.QWidget):
         self.chk_bg.toggled.connect(self.update_preview)
         prow.addWidget(self.chk_neg)
         prow.addWidget(self.chk_bg)
-        right.addLayout(prow)
+        visual.addLayout(prow)
         self.lbl_preview = QtWidgets.QLabel("")
         self.lbl_preview.setWordWrap(True)
-        right.addWidget(self.lbl_preview)
+        visual.addWidget(self.lbl_preview)
 
         grp = QtWidgets.QGroupBox("Export pattern set")
         g = QtWidgets.QGridLayout(grp)
@@ -162,21 +184,61 @@ class SelectTab(QtWidgets.QWidget):
         self.btn_load_set = QtWidgets.QPushButton("Load pattern set…")
         self.btn_load_set.clicked.connect(self.load_pattern_dialog)
         g.addWidget(self.btn_load_set, 4, 0, 1, 2)
-        right.addWidget(grp)
+        visual.addWidget(grp)
+        visual.addStretch(1)
         self.lbl_mouse = QtWidgets.QLabel("")
         self.lbl_mouse.setWordWrap(True)
         right.addWidget(self.lbl_mouse)
+
+    # ------------------------------------------------------------- stim mode
+    def set_stim_mode(self, mode: str):
+        """'visual' (DMD frames) or 'holo' (Wavefront phase masks): same spots, other calibration and output."""
+        assert mode in ("visual", "holo"), mode
+        self.stim_mode = mode
+        holo = mode == "holo"
+        self.stack.setCurrentIndex(1 if holo else 0)
+        self.act_free.setEnabled(not holo)          # freehand outlines have no holographic equivalent
+        self.spin_margin.setEnabled(not holo)
+        if holo and self.canvas.mode == "freehand":
+            self.set_mode("circle")
+        self._refresh_cal_label()
+        self._refresh_overlays()
+        self._select_item(self.selected)            # diameter box in the units of the new calibration
+        self.update_preview()
+        self._refresh_holo()
+
+    def _active_cal(self) -> Calibration | HoloCalibration | None:
+        """Calibration of the current mode: camera -> DMD (visual) or camera -> Wavefront (holo)."""
+        return self.holo_calibration if self.stim_mode == "holo" else self.calibration
+
+    def _refresh_overlays(self):
+        holo = self.stim_mode == "holo"
+        cal, img = self.calibration, self.canvas.image
+        self.canvas.set_field_outline(None if holo or cal is None else cal.dmd_field_in_camera())
+        if holo and self.holo_calibration is not None and img is not None:
+            self.canvas.set_origin_marker(self.holo_calibration.slm_to_camera([(0, 0)], img.shape)[0])
+        else:
+            self.canvas.set_origin_marker(None)
 
     # ------------------------------------------------------------- calibration
     def set_calibration(self, cal: Calibration | None):
         self.calibration = cal
         self.pattern.calibration = cal
         self._refresh_cal_label()
-        self.canvas.set_field_outline(None if cal is None else cal.dmd_field_in_camera())
+        self._refresh_overlays()
         self._refresh_warp()
         self.update_preview()
 
+    def set_holo_calibration(self, cal: HoloCalibration | None):
+        self.holo_calibration = cal
+        self._refresh_cal_label()
+        self._refresh_overlays()
+        self._refresh_holo()
+
     def _refresh_cal_label(self):
+        if self.stim_mode == "holo":
+            self._refresh_holo_cal_label()
+            return
         cal = self.calibration
         link = '<a href="#calibrate">Calibration tab</a>'
         if cal is None:
@@ -195,12 +257,32 @@ class SelectTab(QtWidgets.QWidget):
         self.lbl_cal.setStyleSheet(f"QLabel {{ border: 2px solid {colour}; padding: 4px; }}")
         self.lbl_cal.setText(text)
 
+    def _refresh_holo_cal_label(self):
+        cal = self.holo_calibration
+        link = '<a href="#calibrate">Calibration tab</a>'
+        if cal is None:
+            colour, text = "#c62828", f"<b>No holo calibration.</b> Set it in the {link}."
+        elif not cal.path:
+            colour, text = "#e65100", f"Holo calibration: <b>unsaved</b> ({cal.summary()}). {link}"
+        else:
+            age = cal.age_days
+            stale = age is not None and age > self.config.calibration_max_age_days
+            colour = "#e65100" if stale else "#2e7d32"
+            text = (f"Holo calibration: <b>{cal.created_text()}</b><br>{Path(cal.path).name}, "
+                    f"{cal.summary()}. {link}")
+            if stale:
+                text += f"<br><b>Older than {self.config.calibration_max_age_days} days: consider recalibrating.</b>"
+        self.lbl_cal.setStyleSheet(f"QLabel {{ border: 2px solid {colour}; padding: 4px; }}")
+        self.lbl_cal.setText(text)
+
     def set_config(self, config: Config):
         self.config = config
         self.pattern.config = config
+        self.holo_panel.config = config
         self._refresh_cal_label()
         self._refresh_warp()
         self.update_preview()
+        self._refresh_holo()
 
     # ------------------------------------------------------------------ image
     def load_image_dialog(self):
@@ -212,20 +294,25 @@ class SelectTab(QtWidgets.QWidget):
 
     def load_image(self, path):
         try:
-            self.channels, self.channel_names = load_image(path)
+            channels, names = load_image(path)
         except Exception as e:  # noqa: BLE001
             QtWidgets.QMessageBox.critical(self, "Cannot load image", f"{path}\n{e}")
             return
-        self.pattern.image_path = str(path)
         self.config.last_dir = str(Path(path).parent)
         self.config.save()
+        self.set_channels(channels, names, str(path))
+        self.status.emit(f"Loaded {Path(path).name} ({self.channels[0].shape[1]}x{self.channels[0].shape[0]})")
+
+    def set_channels(self, channels: list[np.ndarray], names: list[str], source: str = ""):
+        """Show new image channels: from a file for now, later from Micro-Manager (snap / live)."""
+        self.channels, self.channel_names = list(channels), list(names)
+        self.pattern.image_path = source
         self._loading = True
         self.channel_combo.clear()
         self.channel_combo.addItems(self.channel_names)
         self._loading = False
         self.channel_combo.setCurrentIndex(0)
         self._show_channel(0)
-        self.status.emit(f"Loaded {Path(path).name} ({self.channels[0].shape[1]}x{self.channels[0].shape[0]})")
 
     def _on_channel(self, idx):
         if not self._loading and 0 <= idx < len(self.channels):
@@ -233,8 +320,10 @@ class SelectTab(QtWidgets.QWidget):
 
     def _show_channel(self, idx):
         self.canvas.set_image(self.channels[idx])
+        self._refresh_overlays()
         self._refresh_warp()
         self.update_preview()
+        self._refresh_holo()
 
     def _refresh_warp(self):
         img = self.canvas.image
@@ -250,13 +339,14 @@ class SelectTab(QtWidgets.QWidget):
         for it in self.items:
             it.set_movable(mode != "freehand")
         self.status.emit({"select": "Select: click a shape, drag to move, handles to resize. Del removes it.",
-                          "circle": "Circle: click to drop a spot of the current radius.",
+                          "circle": "Circle: click to drop a spot of the current diameter.",
                           "freehand": "Freehand: drag around a cell; release to close the outline."}[mode])
 
     def _require_calibration(self) -> bool:
-        if self.calibration is None:
+        if self._active_cal() is None:
+            which = "holo calibration" if self.stim_mode == "holo" else "calibration"
             QtWidgets.QMessageBox.warning(self, "No calibration",
-                                          "Load or make a calibration in the Calibration tab first.")
+                                          f"Load or make a {which} in the Calibration tab first.")
             return False
         if self.canvas.image is None:
             QtWidgets.QMessageBox.warning(self, "No image", "Load a microscope image first.")
@@ -266,7 +356,7 @@ class SelectTab(QtWidgets.QWidget):
     def _on_click(self, x, y):
         if self.canvas.mode != "circle" or not self._require_calibration():
             return
-        r = self.calibration.um_to_camera_px(self.spin_radius.value())
+        r = self._active_cal().um_to_camera_px(self.spin_diam.value() / 2)
         self._push_undo()
         self._add_shape(Circle(x, y, r))
 
@@ -274,7 +364,7 @@ class SelectTab(QtWidgets.QWidget):
         self.canvas.clear_stroke()
         if not self._require_calibration():
             return
-        pts = stroke_to_polygon(stroke, tolerance=max(0.5, self.calibration.um_to_camera_px(0.5)))
+        pts = stroke_to_polygon(stroke, tolerance=max(0.5, self._active_cal().um_to_camera_px(0.5)))
         if pts is None:
             self.status.emit("Stroke too short; drag around the cell.")
             return
@@ -306,15 +396,17 @@ class SelectTab(QtWidgets.QWidget):
             self.list.blockSignals(True)
             self.list.setCurrentRow(row)
             self.list.blockSignals(False)
-            if isinstance(item.shape, Circle):
-                self.spin_radius.blockSignals(True)
-                self.spin_radius.setValue(self.calibration.camera_px_to_um(item.shape.r))
-                self.spin_radius.blockSignals(False)
+            cal = self._active_cal()
+            if isinstance(item.shape, Circle) and cal is not None:
+                self.spin_diam.blockSignals(True)
+                self.spin_diam.setValue(cal.camera_px_to_um(2 * item.shape.r))
+                self.spin_diam.blockSignals(False)
 
-    def _on_radius_changed(self, um):
-        if self.selected is not None and isinstance(self.selected.shape, Circle) and self.calibration:
+    def _on_diameter_changed(self, um):
+        cal = self._active_cal()
+        if self.selected is not None and isinstance(self.selected.shape, Circle) and cal is not None:
             self._push_undo()
-            self.selected.set_radius(self.calibration.um_to_camera_px(um))
+            self.selected.set_radius(cal.um_to_camera_px(um / 2))
 
     def _on_margin_changed(self, um):
         self.pattern.margin_um = um
@@ -403,9 +495,21 @@ class SelectTab(QtWidgets.QWidget):
     # ---------------------------------------------------------------- preview
     def _changed(self):
         self.update_preview()
+        self._refresh_holo()
         self.autosave()
 
+    def _refresh_holo(self):
+        if self.stim_mode != "holo":
+            return
+        img, cal = self.canvas.image, self.holo_calibration
+        shape = img.shape if img is not None else ()
+        spots = holo_spots(self.pattern.shapes, cal, shape) if cal is not None and img is not None else []
+        ignored = [s.name for s in self.pattern.shapes if s.enabled and not isinstance(s, Circle)]
+        self.holo_panel.update_spots(spots, ignored, cal, self.pattern.image_path, shape)
+
     def update_preview(self):
+        if self.stim_mode != "visual":
+            return                                  # hidden; redrawn when switching back
         if self.calibration is None:
             self.preview_item.clear()
             self.lbl_preview.setText("")
@@ -431,7 +535,11 @@ class SelectTab(QtWidgets.QWidget):
 
     def _on_mouse(self, x, y):
         txt = f"camera x={x:.0f} y={y:.0f}"
-        if self.calibration is not None:
+        if self.stim_mode == "holo":
+            if self.holo_calibration is not None and self.canvas.image is not None:
+                sx, sy = self.holo_calibration.camera_to_slm([(x, y)], self.canvas.image.shape)[0]
+                txt += f"  |  Wavefront x={sx:.1f} y={sy:.1f} µm"
+        elif self.calibration is not None:
             dx, dy = self.calibration.camera_to_dmd([(x, y)])[0]
             txt += f"  |  DMD x={dx:.0f} y={dy:.0f} px = {dx * self.config.pixel_size_um:.0f}, " \
                    f"{dy * self.config.pixel_size_um:.0f} µm"

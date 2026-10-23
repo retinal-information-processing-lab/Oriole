@@ -1,11 +1,19 @@
-# Oriole — patterned OSS stimulation
+# Oriole — visual & holographic pattern generation
 
-Desktop tool to turn a microscope image (epi / 2p, e.g. GFP cells) into DMD frames for
-patterned optogenetic stimulation, and to append those frames to an existing stimulus `.bin`.
+Desktop tool to turn a microscope image (epi / 2p, e.g. GFP cells) into stimulation patterns.
+You drop spots (or draw outlines) on the image once; the mode decides what they become:
 
-For every drawn pattern the tool produces the **pattern frame** (light on the selected cells,
-to be shown with the activating LED) and its **negative** (light everywhere else, to be shown
-with the inactive LED) so that the total luminance is uniform over the retina.
+* **Visual (DMD)**: DMD frames for patterned optogenetic stimulation, written as a small
+  standalone `.bin` and mergeable into an existing stimulus `.bin`. For every pattern the tool
+  produces the **pattern frame** (light on the selected cells, to be shown with the activating
+  LED) and its **negative** (light everywhere else, to be shown with the inactive LED) so that
+  the total luminance is uniform over the retina.
+* **Holo (SLM)**: one phase mask per spot, computed and saved by Wavefront IV from scripts
+  Oriole drops in its script folder (replaces the MATLAB DHgui), plus a manual panel to show
+  any phase mask on the SLM and open / close the shutter. Protocols themselves run in Plerion.
+
+Spots are shared by the two modes; each mode has its own calibration. Power is always 100 %
+(no intensity modulation).
 
 Formerly named **Aule**: on first start the settings in `~/.aule/config.json` are picked up and
 saved from then on to `~/.oriole/`.
@@ -40,16 +48,22 @@ python -m oriole info some.bin
 python -m pytest tests                    # self-tests
 ```
 
-Rig defaults (rig 3, 672x672 frame, 2.5 µm/px) are editable in *Settings > Rig / DMD settings*
-and stored in `~/.oriole/config.json` (or `--config` / `--rig` / `--dmd-size` / `--pixel-size`
-on the CLI).
+Rig defaults (rig 3, 672x672 frame, 2.5 µm/px; Wavefront folders `E:\wfdIV_20261022\script`
+and `E:\wfdIV_20261022\GeneratedPhasemasks`; shutter on `Dev1/ao0`, 10 V = open) are editable in
+*Settings > Rig settings* and stored in `~/.oriole/config.json` (or `--config` / `--rig` /
+`--dmd-size` / `--pixel-size` on the CLI). The shutter needs `nidaqmx` and the NI-DAQmx driver;
+without them Oriole runs normally and the shutter buttons report the error.
 
 ## Workflow
 
-The application opens on **1. Select patterns**; the calibration lives in its own tab and only
-needs redoing after the optics changed (or at regular intervals). The date of the last
-calibration is shown at the top right of the Select tab (green = recent, orange = older than
-*warn if calibration older than* in the settings, red = none).
+The application opens on **1. Select spots**. The mode (*Visual (DMD)* / *Holo (SLM)*) is chosen
+in the toolbar and remembered; it switches the calibration and the second tab. The spots stay
+when switching. Each calibration lives in its own tab and only needs redoing after the optics
+changed (or at regular intervals). The date of the last calibration is shown at the top right
+of the Select tab (green = recent, orange = older than *warn if calibration older than* in the
+settings or not saved, red = none).
+
+### Visual mode (DMD)
 
 1. **Calibration** (tab *Calibration*)
    * Display frame 0 of the calibration bin (`calibration_target_MEA3.bin`, kept in the common
@@ -66,11 +80,12 @@ calibration is shown at the top right of the Select tab (green = recent, orange 
    * *Save calibration*: the placement (centre, scale, angle, mirror) is the calibration, saved
      as JSON with its date. It reloads automatically next time. *Use identity* if the image is
      already in DMD frame coordinates.
-2. **Select patterns** (live)
+2. **Select spots** (live)
    * *Load image* (TIFF 8/16-bit, PNG, JPG; channels selectable, z-stacks max-projected).
      Contrast with the histogram on the right of the image, zoom with the wheel, pan with the
      right mouse button or in *Select* mode.
-   * `C` circle: click drops a spot of the chosen radius (µm). `F` freehand: drag around a cell.
+   * `C` circle: click drops a spot of the chosen diameter (µm; with a spot selected, the box
+     resizes it). `F` freehand: drag around a cell.
      `S` select: drag shapes, handles to resize / move vertices. `Del` removes, `Ctrl+Z` undoes.
    * Shapes can be renamed (double-click) and disabled (untick) in the list. *margin* dilates
      every shape by that many µm in the DMD frame.
@@ -95,6 +110,34 @@ calibration is shown at the top right of the Select tab (green = recent, orange 
    * `<output>.indices.json` lists `pos_idx` / `neg_idx` for every frame — use these in the vec
      generation script in place of the full-field background index.
 
+### Holo mode (SLM)
+
+Wavefront IV must be running with *script auto-load* on (its `script` folder is the one in the
+settings). Oriole drives it the way DHgui and Plerion do: it writes `test.js`, then an empty
+`zdone.js`, and waits for Wavefront to take the script before sending the next one.
+
+1. **Calibration** (tab *Calibration*, holo version): typed transform from camera pixels to
+   Wavefront µm, as in `DHparams.m`: pixel size (µm / camera px), ΔX, ΔY, θ, mirror y (on by
+   default) / x. Spots are centred on the image, mirrored, rotated, scaled, then shifted. Edits
+   apply immediately. To calibrate: drop a few spots, *Send spots to SLM (live)*, open the
+   shutter, image the spots, adjust, send again; *Save* when they match (reloaded at start-up).
+   Until a calibration is saved, the `DHparams.m` values are used (0.67 µm/px, ΔX 5, ΔY -8, θ 0).
+2. **Select spots**: same image and spots as in visual mode (freehand outlines are listed as not
+   used). The table gives each spot in Wavefront µm; the magenta cross marks where Wavefront
+   (0, 0) — the zero order — falls on the image.
+   * *Send spots to SLM (live)*: one pattern with all enabled spots, computed and shown but not
+     saved (calibration, quick manual stimulation).
+   * *Generate phase masks…*: one mask per enabled spot, saved by Wavefront as
+     `Pattern1_000.algoPhp.png` … `PatternN_000.algoPhp.png` (the names Plerion's DH tab counts) in
+     the phase mask folder. If old `Pattern<n>` files are there, Oriole shows their date
+     (`YYYY MM DD`) and offers to delete them first, since Plerion would count them as spots. A
+     record `<name>.holo.json` (spots in camera px and µm, calibration, image, masks) is written
+     to the folder you choose.
+3. **Phase masks & shutter**: lists the saved masks; *Load to SLM* (or double-click) shows one on
+   the SLM. *Open* / *Close* / *Pulse* drive the shutter (same controls under the spot table).
+   Oriole holds the NI-DAQ output only while the shutter is open and closes it on exit: close it
+   before starting a Plerion protocol.
+
 ## Frame conventions
 
 * Frames are written through the same `BinFile.append` path as the grating stimuli (rig 3:
@@ -106,14 +149,22 @@ calibration is shown at the top right of the Select tab (green = recent, orange 
 
 ```
 oriole/
-  config.py       rig / DMD settings
+  config.py       rig settings (DMD, Wavefront folders, shutter)
   binfile.py      bin reader / writer (+ raw byte copy)
   calibration.py  calibration target, similarity fit / refinement, Calibration JSON
   geometry.py     Circle / Polygon shapes, simplification, rasterisation to DMD masks
   patterns.py     PatternSet: frames (combined / per shape), export / load, dated bin name
   merge.py        masks as pos/neg frames: small standalone bin, merge into a bin, index JSON
+  holo.py         HoloCalibration (camera -> Wavefront µm, as DHgui), spots, .holo.json record
+  wavefront.py    Wavefront IV scripts (live / one mask / load) and the file-drop client
+  shutter.py      NI-DAQ analog-output shutter
   images.py       image loading, warp to DMD space
   cli.py          gui | calib-bin | merge | info
-  gui/            PyQt6 + pyqtgraph application (select / merge / calibration tabs)
-tests/            pytest (core + offscreen GUI end-to-end)
+  gui/            PyQt6 + pyqtgraph application (select / merge / phase masks / calibration tabs)
+tests/            pytest (core + offscreen GUI end-to-end, Wavefront and NI-DAQ simulated)
 ```
+
+## Later
+
+Micro-Manager as the image source (snap, then live feed, e.g. with pycromanager): frames go in
+through `SelectTab.set_channels`, the same path as a loaded file.

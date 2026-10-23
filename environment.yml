@@ -18,3 +18,6 @@ dependencies:
   - pyqt6>=6.7
   - pyqtgraph>=0.14
   - pytest
+  - pip
+  - pip:
+      - nidaqmx        # holo shutter; optional at runtime, needs the NI-DAQmx driver on the rig

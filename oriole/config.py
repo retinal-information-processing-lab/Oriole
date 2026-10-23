@@ -1,4 +1,4 @@
-"""Rig / DMD configuration shared by all modules."""
+"""Rig configuration (DMD, Wavefront IV, shutter) shared by all modules."""
 from __future__ import annotations
 
 import json
@@ -19,6 +19,15 @@ class Config:
     last_calibration: str = ""     # path of the last saved calibration JSON
     calibration_max_age_days: int = 30   # warn in the GUI when the calibration is older
     last_dir: str = ""             # last directory used in file dialogs
+    mode: str = "visual"           # "visual" (DMD frames) | "holo" (SLM phase masks)
+    last_holo_calibration: str = ""      # path of the last holo calibration JSON
+    wfd_script_dir: str = r"E:\wfdIV_20261022\script"                  # folder Wavefront IV watches
+    wfd_output_dir: str = r"E:\wfdIV_20261022\GeneratedPhasemasks"     # where it saves the phase masks
+    wfd_profile_prefix: str = "Pattern"  # masks saved as <prefix><n>_000.algoPhp.png (what Plerion counts)
+    wfd_timeout_s: float = 120.0   # give up waiting for Wavefront after this long per script
+    nidaq_device: str = "Dev1"     # NI-DAQ device driving the shutter (as in Plerion)
+    shutter_ao: int = 0            # its analog output channel
+    shutter_open_v: float = 10.0   # voltage that opens the shutter; 0 V closes it
     path: str = field(default="", compare=False)   # where this config is saved (not serialised)
 
     @property
