@@ -12,3 +12,7 @@ PulsingGratingOSS/
 
 # Claude Code local settings (per-machine permission allowlist)
 .claude/
+
+# DHgui (MATLAB) copy kept for reference, and Windows shortcuts
+DHgui_20261022/
+*.lnk

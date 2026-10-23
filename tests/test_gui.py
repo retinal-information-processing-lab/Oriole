@@ -5,6 +5,7 @@ import re
 import shutil
 from pathlib import Path
 
+import imageio.v2 as imageio
 import numpy as np
 import pytest
 
@@ -15,6 +16,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 from oriole.binfile import read_header  # noqa: E402
 from oriole.config import Config  # noqa: E402
 from oriole.gui import MainWindow, apply_dark_theme  # noqa: E402
+from oriole import holo  # noqa: E402
 from oriole.shutter import ShutterError  # noqa: E402
 from tests.conftest import EXISTING_BIN  # noqa: E402
 
@@ -42,6 +44,9 @@ class FakeTask:
 def window(qapp, tmp_path, monkeypatch):
     daq_log = []
     monkeypatch.setattr("oriole.shutter._new_task", lambda device, ao: FakeTask(daq_log))
+    for name in ("warning", "question"):                # a dialog no test answers would hang: fail instead
+        monkeypatch.setattr(QtWidgets.QMessageBox, name, staticmethod(lambda *a, **k: pytest.fail(f"dialog: {a[1]}")))
+    monkeypatch.setattr(MainWindow, "_choose", lambda self, title, *a: pytest.fail(f"dialog: {title}"))
     cfg = Config(wfd_root=str(tmp_path / "wfd"))
     for d in (cfg.wfd_script_dir, cfg.wfd_output_dir):
         os.makedirs(d)
@@ -52,17 +57,33 @@ def window(qapp, tmp_path, monkeypatch):
     w.close()
 
 
-def _simulate_wavefront(w) -> str:
-    """What Wavefront IV does with a dropped script: run it (saving the mask if asked), remove it."""
+def _raw_src(path, x_um, y_um, diameter_um, um_px=0.652, size=576):
+    """Wavefront's rawSrc.png: the drawn spot, white on black, (0, 0) µm at the centre, y up."""
+    yy, xx = np.mgrid[0:size, 0:size]
+    cx, cy = size / 2 + x_um / um_px - 0.5, size / 2 - y_um / um_px - 0.5
+    imageio.imwrite(path, ((np.hypot(xx - cx, yy - cy) <= diameter_um / um_px / 2) * 255).astype(np.uint8))
+
+
+def _simulate_wavefront(w, drawn_at=None) -> str:
+    """What Wavefront IV does with a dropped script: run it (saving the mask and the spot it drew if asked; the
+    spot elsewhere with ``drawn_at``), remove it."""
     script = Path(w.config.wfd_script_dir) / "test.js"
     js = script.read_text()
     m = re.search(r'setProfileName\("(\w+)"\);', js)
     if m and "saveProfile" in js:
-        (Path(w.config.wfd_output_dir) / f"{m.group(1)}_000.algoPhp.png").write_bytes(b"png")
+        out = Path(w.config.wfd_output_dir)
+        x, y, d = map(float, re.search(r"drawSpot\(([-\d.]+),([-\d.]+),([-\d.]+)\);", js).groups())
+        _raw_src(out / f"{m.group(1)}_000.rawSrc.png", *(drawn_at or (x, y)), d)
+        (out / f"{m.group(1)}_000.algoPhp.png").write_bytes(b"png")
     script.unlink()
     (script.parent / "zdone.js").unlink()
     w.poll()
     return js
+
+
+def _generate(w):
+    w.generate()
+    assert (Path(w.config.wfd_script_dir) / "test.js").read_text().startswith(holo.EMPTY_LIST + "\n")
 
 
 def test_end_to_end(window, tmp_path, monkeypatch):
@@ -111,7 +132,7 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert read_header(merged)["nb_images"] == 15 + 4 and w.config.linked_bin == str(linked)
     assert "spot 1 at frames 15/16" in log()
 
-    # --- holo: masks already in the phase mask folder turn Generate yellow and block it
+    # --- holo: a file in a Wavefront folder turns Generate yellow; Generate then warns, sweeps only on a yes
     out_dir, script_dir = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir)
     old = out_dir / "Pattern7_000.algoPhp.png"
     old.write_bytes(b"old")
@@ -119,37 +140,60 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     os.utime(old, (t, t))
     w.refresh_masks()                                   # the folder watcher does this in the application
     assert "#FFD700" in w.btn_generate.styleSheet() and w.combo_mask.currentText() == "7"
-    w.generate()
-    assert "phase mask folder is not empty" in log() and "2026 10 20" in log()
-    assert old.exists() and not (script_dir / "test.js").exists()
-    old.unlink()
-    w.refresh_masks()
-    assert "#00FF00" in w.btn_generate.styleSheet() and w.combo_mask.count() == 0
+    warnings = []
+    Btn = QtWidgets.QMessageBox.StandardButton
 
-    # --- a script left behind by Wavefront is purged first, then one mask per spot
-    (script_dir / "test.js").write_text("stale")
+    def answer(button):
+        return staticmethod(lambda *a, **k: warnings.append(a[2]) or button)
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", answer(Btn.Cancel))
     w.generate()
-    assert "script folder purged (test.js" in log() and not w.btn_generate.isEnabled()
+    assert "phase mask folder: 1 file (1 mask), dated 2026 10 20" in warnings[-1]
+    assert "not generating: the Wavefront folders must be empty" in log() and old.exists() and not w.jobs
+    (script_dir / "test.js").write_text("stale")        # a script Wavefront did not take
+    (script_dir / "zdone.js").write_text("")
+    w.refresh_masks()
+    assert "#FFD700" in w.btn_generate.styleSheet()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", answer(Btn.Yes))
+    w.generate()
+    assert "• script folder: test.js, zdone.js (not taken by Wavefront: is auto load on?)" in warnings[-1]
+    assert "Wavefront folders swept (3 files)" in log() and not old.exists()
+
+    # --- Wavefront first empties its pattern list, then one mask per spot, each checked against its drawn spot
+    assert w.btn_generate.text() == "■ STOP" and "#FF6060" in w.btn_generate.styleSheet()
+    assert not w.btn_load_mask.isEnabled()
     js1 = _simulate_wavefront(w)
+    assert js1.startswith("for (var id = 0; id <= 500; id++) { deleteProfile(id); }\ncleanAllBlob();\n")
     assert 'setProfileName("Pattern1");' in js1 and "drawSpot(19.4000,5.4000,10.0000);" in js1
+    assert w.btn_generate.text() == "■ STOP"          # the folder watcher's refresh keeps STOP
     js2 = _simulate_wavefront(w)
     assert 'setProfileName("Pattern2");' in js2 and "saveProfile(0);" in js2
-    assert w.btn_generate.isEnabled() and "2 phase masks saved" in log()
+    assert w.btn_generate.text() == "GENERATE PHASE MASKS" and "2 phase masks saved" in log()
     rec = json.loads((out_dir / "Pattern_spots.json").read_text())
     assert [m["mask"] for m in rec["masks"]] == ["Pattern1_000.algoPhp.png", "Pattern2_000.algoPhp.png"]
     assert [w.combo_mask.itemText(i) for i in range(w.combo_mask.count())] == ["1", "2"]
     assert "#FFD700" in w.btn_generate.styleSheet()     # the folder now holds masks
 
-    # --- manual: pick a mask number and load it; a warning if Wavefront does not take the script
+    # --- manual: pick a mask number and load it; a script Wavefront does not take is erased and sent again
     w.combo_mask.setCurrentText("2")
     w.btn_load_mask.click()
     escaped = str(out_dir / "Pattern2_000.algoPhp.png").replace("\\", "\\\\")
     assert (script_dir / "test.js").read_text().endswith(f'loadProfile("{escaped}", 2);\n')
     monkeypatch.setattr("oriole.holo.NOT_READ_S", 0)
     w.check_load_taken()
-    assert "Tools → Script engine → auto load (script folder)" in log()
+    assert "loading Pattern2 within 0 s (attempt 1/3): script erased, sending it again" in log()
+    assert (script_dir / "test.js").read_text().endswith(f'loadProfile("{escaped}", 2);\n')
+    w.check_load_taken()
+    assert "(attempt 2/3): script erased" in log() and w.slm_spot is not None
+    w.check_load_taken()
+    assert "(attempt 3/3): Pattern2 not loaded; check that" in log() and "auto load (script folder)" in log()
+    assert not any(script_dir.iterdir()) and w.load is None and w.slm_spot is None
+    w.btn_load_mask.click()
+    (script_dir / "test.js").unlink()                   # taken by Wavefront this time
+    w.check_load_taken()
+    assert w.load is None and (script_dir / "zdone.js").exists()      # nothing erased nor sent again
 
     # --- brooms: the script folder at once, the mask folder after a yes
+    (script_dir / "test.js").write_text("left behind")
     w.btn_sweep_scripts.click()
     assert "script folder swept clean" in log() and not any(script_dir.iterdir())
     w.btn_sweep_scripts.click()
@@ -160,7 +204,7 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     monkeypatch.setattr(QtWidgets.QMessageBox, "question", lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes)
     w.btn_sweep_masks.click()
     assert not any(out_dir.iterdir()) and w.combo_mask.count() == 0 and "#00FF00" in w.btn_generate.styleSheet()
-    assert "phase mask folder swept clean (3 files)" in log()
+    assert "phase mask folder swept clean (5 files)" in log()           # 2 masks, their 2 drawn spots, the record
     w.btn_open.click()
     assert w.shutter.is_open and w.daq_log == ["new", 10.0] and "OPEN" in w.lbl_shutter.text()
     w.btn_close.click()
@@ -192,6 +236,280 @@ def test_fixed_view_drag_spots_and_help(window):
     w.btn_help.click()
     assert w.help_dialog.isVisible()
     assert "Pattern1" in w.help_dialog.findChild(QtWidgets.QTextBrowser).toPlainText()
+
+
+def _take_without_saving(w):
+    """Wavefront removes the script but never saves the mask."""
+    for name in ("test.js", "zdone.js"):
+        (Path(w.config.wfd_script_dir) / name).unlink()
+    w.poll()
+
+
+def test_mask_not_saved_is_sent_again_then_aborts(window, monkeypatch):
+    w = window
+    log = w.log_view.toPlainText
+    out_dir, script_dir = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir)
+    w.set_image(np.zeros((512, 672), np.float32))
+    for x, y in ((100.0, 100.0), (300.0, 200.0)):
+        w._on_click(x, y, False)
+    _generate(w)
+    (out_dir / "Pattern1_000.algoPhp.png").write_bytes(b"")        # an empty file is not a saved mask
+    monkeypatch.setattr("oriole.holo.MASK_WAIT_S", -1)
+    _take_without_saving(w)
+    assert ("took the Pattern1 script but did not save Pattern1_000.algoPhp.png within -1 s (attempt 1/3): "
+            "script erased, sending it again") in log()
+    monkeypatch.setattr("oriole.holo.MASK_WAIT_S", 10.0)
+    _simulate_wavefront(w)                                          # saved at the second attempt
+    assert "computing Pattern2 (2 of 2)" in log().splitlines()[-1]  # attempts start again for the next mask
+    monkeypatch.setattr("oriole.holo.MASK_WAIT_S", -1)
+    for k in (1, 2):
+        _take_without_saving(w)
+        assert f"Pattern2_000.algoPhp.png within -1 s (attempt {k}/3): script erased" in log()
+    _take_without_saving(w)
+    assert "Pattern2_000.algoPhp.png within -1 s (attempt 3/3): generation aborted; cleaning up in 2 s" in log()
+    (out_dir / "Pattern2_000.algoPhp.png").write_bytes(b"png")     # Wavefront was still computing: saved late
+    monkeypatch.setattr("oriole.holo.ABORT_WAIT_S", 0)
+    w.poll()
+    assert ("cleaned up after the abort: both Wavefront folders emptied (3 files: Pattern1_000.algoPhp.png, "
+            "Pattern1_000.rawSrc.png, Pattern2_000.algoPhp.png); restart Wavefront IV and generate again") in log()
+    assert not any(out_dir.iterdir()) and not any(script_dir.iterdir()) and not w.jobs
+    assert w.btn_generate.text() == "GENERATE PHASE MASKS" and "#00FF00" in w.btn_generate.styleSheet()
+
+
+def test_stop_waits_for_wavefront_then_sweeps(window, monkeypatch):
+    w = window
+    log = w.log_view.toPlainText
+    out_dir, script_dir = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir)
+    w.set_image(np.zeros((512, 672), np.float32))
+    for x, y in ((100.0, 100.0), (300.0, 200.0), (400.0, 300.0)):
+        w._on_click(x, y, False)
+    w.btn_generate.click()
+    for _ in range(2):                                              # Pattern1, Pattern2
+        _simulate_wavefront(w)
+    assert w.btn_generate.text() == "■ STOP" and (script_dir / "test.js").exists()
+    w.btn_generate.click()
+    assert "STOP pressed: generation aborted; cleaning up in 2 s, Wavefront may still be computing" in log()
+    assert not w.jobs and not w.btn_generate.isEnabled() and not w.btn_load_mask.isEnabled()
+    w.poll()
+    assert w.btn_generate.text() == "CLEANING UP IN 2 s"
+    assert len(list(out_dir.iterdir())) == 4 and (script_dir / "test.js").exists()    # nothing swept yet
+    w.generate()
+    w.btn_sweep_masks.click()
+    assert "still computing the previous masks" in log() and "not now" in log() and not w.jobs
+    monkeypatch.setattr("oriole.holo.ABORT_WAIT_S", 0)
+    w.poll()
+    assert ("cleaned up after the abort: both Wavefront folders emptied (6 files: test.js, zdone.js, "
+            "Pattern1_000.algoPhp.png, Pattern1_000.rawSrc.png, Pattern2_000.algoPhp.png, Pattern2_000.rawSrc.png)"
+            ) in log().splitlines()[-1]
+    assert not any(out_dir.iterdir()) and not any(script_dir.iterdir())
+    assert w.btn_generate.isEnabled() and w.btn_generate.text() == "GENERATE PHASE MASKS" and w.combo_mask.count() == 0
+    w.poll()                                                        # a late tick of the timer does nothing
+    w.btn_generate.click()
+    assert w.jobs and "computing Pattern1 (1 of 3)" in log().splitlines()[-1]
+    w.close()                                                       # closing sweeps at once
+    assert not w.jobs and not any(script_dir.iterdir()) and "cleaned up after the abort" in log().splitlines()[-1]
+
+
+def test_mask_holding_another_spot_aborts(window, monkeypatch):
+    w = window
+    log = w.log_view.toPlainText
+    out_dir = Path(w.config.wfd_output_dir)
+    w.set_image(np.zeros((512, 672), np.float32))
+    for x, y in ((100.0, 100.0), (300.0, 200.0), (400.0, 300.0)):
+        w._on_click(x, y, False)
+    _generate(w)
+    js1 = _simulate_wavefront(w)                                    # Pattern1: its own spot
+    x1, y1 = map(float, re.search(r"drawSpot\(([-\d.]+),([-\d.]+),", js1).groups())
+    _simulate_wavefront(w, drawn_at=(x1, y1))                       # Pattern2 saved with spot 1
+    assert re.search(r"Pattern2 holds a spot drawn at \(-15\d\.\d, 9\d\.\d\) µm, not at \(-18\.8, 29\.2\) µm \(spot 2\): "
+                     r"generation aborted", log()) and abs(x1 + 151.8) < 1 and abs(y1 - 96.2) < 1
+    monkeypatch.setattr("oriole.holo.ABORT_WAIT_S", 0)
+    w.poll()
+    assert "restart Wavefront IV and generate again" in log().splitlines()[-1] and not any(out_dir.iterdir())
+
+    # nothing drawn for a spot inside the field: a big red warning, the generation goes on
+    _generate(w)
+    _simulate_wavefront(w, drawn_at=(1000.0, 1000.0))
+    assert re.search(r"⚠ Pattern1 HOLDS NO SPOT: Wavefront drew nothing for spot 1 at \(-15\d\.\d, 9\d\.\d\) µm "
+                     r"\(outside its field\?\)", log())
+    assert w.jobs and "computing Pattern2 (2 of 3)" in log().splitlines()[-1]
+
+
+def test_spots_outside_the_slm_field(window, monkeypatch):
+    w = window
+    log = w.log_view.toPlainText
+    last = lambda: log().splitlines()[-1]                           # noqa: E731
+    script_dir = Path(w.config.wfd_script_dir)
+    w.set_image(np.zeros((512, 672), np.float32))
+    for x in (336.0, 606.0, 660.0):                                 # in, cut by the field's edge, out
+        w._on_click(x, 256.0, False)
+    um = w.config.holo.to_um(w.spots, (512, 672))
+    assert [holo.field_fit(x, y, 10.0) for x, y in um] == ["in", "partly", "out"]
+    off = f"spot 2 partly at ({um[1][0]:.1f}, {um[1][1]:.1f}) µm, spot 3 at ({um[2][0]:.1f}, {um[2][1]:.1f}) µm"
+    asked, answer = [], {"choice": None}
+    monkeypatch.setattr(w, "_choose", lambda title, text, choices: asked.append((text, choices)) or answer["choice"])
+
+    # a pop-up lists them; Cancel: nothing sent
+    w.generate()
+    assert asked[-1] == ("Outside the SLM field (Wavefront: ±187.8 µm):\n\n• " + off.replace(", spot", "\n• spot") +
+                         "\n\nTheir masks would hold no spot, or a cut one. A right click on a spot removes it; Remove "
+                         "spots removes them all (Undo brings them back) and generates the others.",
+                         {"remove": "Remove spots and generate", "anyway": "Generate anyway"})
+    assert not w.jobs and not any(script_dir.iterdir()) and len(w.spots) == 3
+    assert f"not generating: {off} outside the SLM field (a right click on a spot removes it)" in log()
+
+    # Generate anyway: generated, with a big red warning; those masks are not checked
+    answer["choice"] = "anyway"
+    _generate(w)
+    alarm = f"⚠ OUTSIDE THE SLM FIELD (Wavefront: ±187.8 µm): {off}. Their masks hold no spot or a cut one; generating anyway"
+    assert alarm in log()
+    assert re.search(r'font-size:\s*14pt[^>]*>[^<]*⚠ OUTSIDE THE SLM FIELD', w.log_view.document().toHtml())   # big
+    for _ in range(3):                                              # spot 2 drawn cut, spot 3 not drawn: not checked
+        _simulate_wavefront(w)
+    assert "3 phase masks saved" in last() and "HOLDS NO SPOT" not in log()
+
+    # Remove spots and generate: both go (one Undo brings them back), the other one is generated
+    answer["choice"] = "remove"
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes)
+    w.generate()                                                    # (after sweeping the masks just made)
+    assert w.spots == [(336.0, 256.0)] and "removed spot 2, spot 3: outside the SLM field (Undo brings them back)" in log()
+    assert len(w.jobs) == 1 and "computing Pattern1 (1 of 1)" in last() and log().count("⚠ OUTSIDE") == 1
+    _simulate_wavefront(w)
+    assert "1 phase mask saved" in last()
+    w.undo()
+    assert len(w.spots) == 3
+
+    # nothing left in the field: nothing generated
+    w.clear()
+    w._on_click(660.0, 256.0, False)
+    w.generate()
+    assert not w.spots and not w.jobs and "not generating: no spot left in the SLM field" in last()
+
+
+def test_cleanup_sweeps_until_the_folders_are_empty(window, monkeypatch):
+    w = window
+    log = w.log_view.toPlainText
+    out_dir = Path(w.config.wfd_output_dir)
+    w.set_image(np.zeros((512, 672), np.float32))
+    for x, y in ((100.0, 100.0), (300.0, 200.0)):
+        w._on_click(x, y, False)
+    in_use = {"n": 2}                                               # Wavefront still holds Pattern1 for 2 sweeps
+    unlink = Path.unlink
+
+    def unlink_unless_in_use(self, *a, **k):
+        if self.name == "Pattern1_000.algoPhp.png" and in_use["n"]:
+            in_use["n"] -= 1
+            raise PermissionError("in use")
+        return unlink(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", unlink_unless_in_use)
+    monkeypatch.setattr("oriole.holo.ABORT_WAIT_S", 0)
+    _generate(w)
+    _simulate_wavefront(w)
+    w.btn_generate.click()                                          # STOP
+    w.poll()
+    assert (out_dir / "Pattern1_000.algoPhp.png").exists() and w.btn_generate.text() == "CLEANING UP…"
+    w.poll()
+    assert w.cleanup["sweeps"] == 1 and w.btn_generate.text() == "CLEANING UP IN 1 s"     # again 1 s later
+    w.cleanup["t0"] -= 1
+    w.poll()
+    assert w.cleanup["sweeps"] == 2
+    w.cleanup["t0"] -= 1
+    w.poll()
+    assert w.cleanup is None and not any(out_dir.iterdir())
+    assert ("cleaned up after the abort (3 sweeps): both Wavefront folders emptied (4 files: test.js, zdone.js, "
+            "Pattern1_000.rawSrc.png, Pattern1_000.algoPhp.png)") in log()
+
+    # still there after MAX_SWEEPS sweeps: said so
+    monkeypatch.setattr("oriole.holo.MAX_SWEEPS", 2)
+    in_use["n"] = 99
+    _generate(w)
+    _simulate_wavefront(w)
+    w.btn_generate.click()
+    for _ in range(2):
+        w.cleanup["t0"] -= 1
+        w.poll()
+    assert w.cleanup is None and ("cleanup after the abort incomplete: Pattern1_000.algoPhp.png still in the "
+                                  "Wavefront folders after 2 sweeps: sweep them with the 🧹") in log()
+    assert "#FFD700" in w.btn_generate.styleSheet()
+    in_use["n"] = 0
+
+
+def test_loaded_mask_spot_is_ringed(window, monkeypatch):
+    w = window
+    log = w.log_view.toPlainText
+    out_dir = Path(w.config.wfd_output_dir)
+    w.set_image(np.zeros((512, 672), np.float32))
+    for x, y in ((100.0, 100.0), (300.0, 200.0)):
+        w._on_click(x, y, False)
+    _generate(w)
+    _simulate_wavefront(w)
+    _simulate_wavefront(w)
+    assert len(w.view.slm_item.points()) == 0 and not w.view.slm_label.isVisible()
+    w.combo_mask.setCurrentText("2")
+    w.btn_load_mask.click()
+    ring = w.view.slm_item.points()
+    assert [tuple(p.pos()) for p in ring] == [(300.0, 200.0)] and ring[0].size() > w.diameter_px()
+    assert w.view.slm_label.isVisible()
+    w.clear()                                           # spots edited: the ring stays where Pattern2 was clicked
+    assert [tuple(p.pos()) for p in w.view.slm_item.points()] == [(300.0, 200.0)]
+
+    # a mask made again since the record (e.g. by DHgui): loaded, but no ring
+    t = (out_dir / "Pattern_spots.json").stat().st_mtime + 60
+    os.utime(out_dir / "Pattern2_000.algoPhp.png", (t, t))
+    w.btn_load_mask.click()
+    assert len(w.view.slm_item.points()) == 0 and "Pattern2 is not in an up to date Pattern_spots.json" in log()
+
+    # a new Generate computes on the SLM: the ring goes
+    w.combo_mask.setCurrentText("1")
+    w.btn_load_mask.click()
+    assert [tuple(p.pos()) for p in w.view.slm_item.points()] == [(100.0, 100.0)]
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *a, **k: QtWidgets.QMessageBox.StandardButton.Yes)
+    w._on_click(200.0, 200.0, False)
+    w.generate()                                        # after sweeping the masks and the load script
+    assert w.jobs and len(w.view.slm_item.points()) == 0 and not w.view.slm_label.isVisible()
+
+
+def test_wavefront_field_on_the_image_and_open_folder(window, monkeypatch):
+    w = window
+    no_go = w.view.no_go_items
+    assert not any(item.isVisible() for item in w.view.field_items + no_go)          # no image: no field
+    w.set_image(np.zeros((512, 672), np.float32))
+    items = w.view.field_items
+    assert len(items) == 5 and all(i.isVisible() and i.parentItem() is w.view.image_item for i in items)
+    pens = [(i.opts["pen"].color().name(), i.opts["pen"].style()) for i in items]
+    Pen = QtCore.Qt.PenStyle
+    assert pens == [("#ff4040", Pen.SolidLine), ("#ff9a3c", Pen.DashLine), ("#ffe14d", Pen.DashLine)] + [
+        ("#c8c8c8", Pen.DashLine)] * 2                    # square red, 20 % circle orange, 90 % yellow, cross grey
+    centre = w.config.holo.from_um([(0, 0)], (512, 672))[0]
+    cross_x, cross_y = items[3].getData()
+    assert np.allclose((cross_x.mean(), cross_y.mean()), centre)                     # (0, 0) µm through the calibration
+    x90, y90 = items[2].getData()
+    assert np.allclose(np.hypot(x90 - centre[0], y90 - centre[1]), 47.0 / 0.67)      # 90 %: r 47 µm
+    x_sq, _ = items[0].getData()
+    assert np.isclose(x_sq.max() - x_sq.min(), 2 * 187.8 / 0.67)                     # the 576 px canvas
+    # outside the square: a red veil and red hatching, over the image only
+    assert all(i.isVisible() and i.parentItem() is w.view.image_item for i in no_go)
+    assert [i.brush().style() for i in no_go] == [QtCore.Qt.BrushStyle.SolidPattern, QtCore.Qt.BrushStyle.BDiagPattern]
+    inside, outside = QtCore.QPointF(*centre), QtCore.QPointF(x_sq.min() - 5, centre[1])
+    assert not no_go[1].path().contains(inside) and no_go[1].path().contains(outside)
+    w.holo_box.spins["x_um"].setValue(25.0)                                          # the field follows the calibration
+    assert np.isclose(items[3].getData()[0].mean(), centre[0] - 20.0 / 0.67)
+    assert no_go[1].path().contains(QtCore.QPointF(x_sq.max() - 5, centre[1]))       # now outside on the right
+    w.chk_slm_field.setChecked(False)                                                # hidden, and kept so
+    assert not any(i.isVisible() for i in items + no_go) and not w.config.show_slm_field
+    assert json.loads(Path(w.config.path).read_text())["show_slm_field"] is False
+    w.set_image(np.zeros((512, 672), np.float32))
+    assert not any(i.isVisible() for i in items + no_go)
+    w.chk_slm_field.setChecked(True)
+    assert all(i.isVisible() for i in items + no_go)
+
+    opened = []
+    monkeypatch.setattr(QtGui.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
+    w.btn_open_masks.click()
+    assert [Path(p) for p in opened] == [Path(w.config.wfd_output_dir)]
+    w.edit_wfd_root._set(str(Path(w.config.wfd_root) / "missing"))
+    w.btn_open_masks.click()
+    assert len(opened) == 1 and "folder not found" in w.log_view.toPlainText().splitlines()[-1]
 
 
 def _mouse(w, kind, x, y, button, buttons=None):
@@ -271,18 +589,25 @@ def test_failures_are_logged(window, monkeypatch):
     w.set_image(np.zeros((100, 100), np.float32))
     w._on_click(50.0, 50.0, False)
 
-    # Wavefront never takes the script: a warning after NOT_READ_S, an error at the timeout
+    # Wavefront never takes the script: erased and sent again (attempt 1/3, 2/3), aborted at 3/3
+    script = Path(w.config.wfd_script_dir) / "test.js"
     monkeypatch.setattr("oriole.holo.NOT_READ_S", -1)
     w.generate()
+    for k in (1, 2):
+        w.poll()
+        assert (f"did not take the Pattern1 script within -1 s (attempt {k}/3): script erased, sending it "
+                f"again") in log() and script.exists() and w.btn_generate.text() == "■ STOP"
+    assert "Wavefront: computing Pattern1 (1 of 1, attempt 3/3)" in log()
     w.poll()
-    assert "not being used by Wavefront" in log() and "auto load (script folder)" in log()
-    assert not w.btn_generate.isEnabled()
-    monkeypatch.setattr("oriole.holo.TIMEOUT_S", -1)
+    assert "(attempt 3/3): generation aborted; cleaning up in 2 s" in log() and not w.jobs
+    assert not script.exists()                          # never taken: erased at once, as at 1/3 and 2/3
+    monkeypatch.setattr("oriole.holo.ABORT_WAIT_S", 0)
     w.poll()
-    assert "did not take the script" in log() and w.btn_generate.isEnabled()
-    # the next Generate purges the script left behind and starts again
-    w.generate()
-    assert "script folder purged (test.js, zdone.js" in log() and not w.btn_generate.isEnabled()
+    assert "cleaned up after the abort: both Wavefront folders emptied (0 files); check that" in log()
+    assert "auto load (script folder)" in log() and not any(script.parent.iterdir())
+    assert w.btn_generate.isEnabled() and w.btn_generate.text() == "GENERATE PHASE MASKS"
+    w.generate()                                        # ready to generate again
+    assert w.jobs and w.btn_generate.text() == "■ STOP"
 
     # no NI-DAQ: the error is logged and the shutter stays closed
     def no_daq(device, ao):

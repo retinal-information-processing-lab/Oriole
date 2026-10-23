@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import html
+import math
 import sys
 import time
 from pathlib import Path
@@ -26,7 +27,12 @@ BG, CARD, TEXT, DIM, BTN, ACCENT = "#121212", "#1E1E1E", "#E0E0E0", "#555555", "
 PANEL_BG = "#181818"                                    # the three parts are cards on the window background
 VISUAL_COLOUR, IMAGE_COLOUR, HOLO_COLOUR = "#2D6A9F", "#3A3A3A", "#7A3E9D"
 SPOT = (255, 40, 40)
-LOG_COLOURS = {"info": "#00FF00", "warn": "#FFD700", "error": "#FF4444"}
+SLM_RING = "#C77DFF"                                    # the spot whose mask is on the SLM (holo purple, lighter)
+NO_GO = "#FF4040"                                       # outside Wavefront's field: red line, hatched area
+FIELD_PENS = {"square": pg.mkPen(NO_GO, width=2),       # Wavefront's field outline; dashed: its 20 % (outer) and
+              **{kind: pg.mkPen(colour, width=1.5, style=QtCore.Qt.PenStyle.DashLine)     # 90 % (inner) circles
+                 for kind, colour in (("outer", "#FF9A3C"), ("inner", "#FFE14D"), ("cross", "#C8C8C8"))}}
+LOG_COLOURS = {"info": "#00FF00", "warn": "#FFD700", "error": "#FF4444", "alarm": "#FF4444"}   # alarm: big, bold
 ACTION_STYLE = """
     QPushButton { background: #1A4A1A; color: #00FF00; border: none; border-radius: 4px;
                   font: bold 11pt 'Consolas'; padding: 10px; }
@@ -52,16 +58,35 @@ spot and 2(i−1)+1 its negative; a <code>.json</code> lists the frames.<br>
 new frame numbers).</p>
 <h3>Holo · SLM</h3>
 <p><b>Wavefront folder</b>: scripts go to its <code>script\\</code>, masks are read from its
-<code>GeneratedPhasemasks\\</code>; 🧹 sweeps a folder clean.<br>
-<b>GENERATE PHASE MASKS</b> empties the script folder, then has Wavefront save one mask per spot,
-<code>Pattern1…N</code>. It is <span style="color:#FFD700">yellow</span> and refuses while the phase mask folder
-holds masks: sweep it first. If Wavefront does not take a script within 10 s:
-Tools → Script engine → auto load (script folder).<br>
-<b>Manual</b>: pick a mask number and <b>Load</b> it onto the SLM; <b>Open</b> / <b>Close</b> the shutter
-(close it before a Plerion protocol).</p>
+<code>GeneratedPhasemasks\\</code>; 🧹 sweeps a folder clean, 📂 opens the phase mask folder in the file
+explorer.<br>
+On the image, through the holo calibration, Wavefront's field as Wavefront draws it: its square in
+<span style="color:{NO_GO}">red</span>, the image outside it hatched red (no-go zone: Wavefront cannot put a spot
+there), its 20 % diffraction efficiency circle in <span style="color:#FF9A3C">orange</span> dashes, its 90 % one in
+<span style="color:#FFE14D">yellow</span>, its centre cross in light grey; <b>SLM field on the image</b> (holo
+Settings) shows or hides it. With spots (partly) outside the field, Generate first asks: <b>Remove spots and
+generate</b> (Undo brings them back), <b>Generate anyway</b> (their masks hold no spot, or a cut one; big red
+warning in the log) or <b>Cancel</b> (a right click removes a spot).<br>
+<b>GENERATE PHASE MASKS</b> has Wavefront save one mask per spot, <code>Pattern1…N</code>, each script
+emptying Wavefront's pattern list first (a pattern left there, made by hand or loaded, would stop every mask from
+being saved), each mask checked against the spot Wavefront drew for it (<code>rawSrc.png</code>).
+It is <span style="color:#FFD700">yellow</span> while the script
+or phase mask folder is not empty: it then warns and sweeps them only on a yes. While it runs it is a red
+<b>STOP</b>.<br>
+A script Wavefront does not take within {holo.NOT_READ_S:.0f} s, or a mask it does not save within
+{holo.MASK_WAIT_S:.0f} s, is erased and sent again (attempt 1/{holo.MAX_ATTEMPTS}, 2/{holo.MAX_ATTEMPTS}…); at
+{holo.MAX_ATTEMPTS}/{holo.MAX_ATTEMPTS} the generation is aborted. After STOP or an abort Oriole waits
+{holo.ABORT_WAIT_S:.0f} s (Wavefront may still be computing), then sweeps both Wavefront folders, again every second
+until they are empty: ready to generate again (check Tools → Script engine → auto load (script folder), or restart
+Wavefront).<br>
+<b>Manual</b>: pick a mask number and <b>Load</b> it onto the SLM (a script not taken is erased and sent again,
+{holo.MAX_ATTEMPTS} attempts): its spot gets a
+<span style="color:{SLM_RING}">purple SLM ring</span> on the image (where it was clicked, from
+<code>Pattern_spots.json</code>); <b>Open</b> / <b>Close</b> the shutter (close it before a Plerion protocol).</p>
 <p>Everything typed is saved in <code>~/.oriole/config.json</code>.</p>
 """
 BLOCKED_STYLE = ACTION_STYLE.replace("#1A4A1A", "#4A4A1A").replace("#00FF00", "#FFD700").replace("#2A6A2A", "#6A6A2A")
+STOP_STYLE = ACTION_STYLE.replace("#1A4A1A", "#5A1414").replace("#00FF00", "#FF6060").replace("#2A6A2A", "#7A2020")
 
 
 def apply_dark_theme(app: QtWidgets.QApplication):
@@ -167,6 +192,16 @@ def camera_target(w: int = EPI_SIZE[0], h: int = EPI_SIZE[1]) -> np.ndarray:
     return rows[:, :3 * w].reshape(h, w, 3).copy()
 
 
+def _n(count: int, word: str) -> str:
+    return f"{count} {word}{'s' if count != 1 else ''}"
+
+
+def _dates(paths) -> str:
+    """Modification dates of ``paths`` as 'YYYY MM DD' or 'YYYY MM DD – YYYY MM DD'."""
+    first, last = holo.date_range(paths)
+    return f"{first:%Y %m %d}" if first == last else f"{first:%Y %m %d} – {last:%Y %m %d}"
+
+
 def _action_button(text: str) -> QtWidgets.QPushButton:
     btn = QtWidgets.QPushButton(text)
     btn.setStyleSheet(ACTION_STYLE)
@@ -244,21 +279,66 @@ class ImageView(pg.GraphicsLayoutWidget):
         self.vb = _ClickViewBox()
         self.addItem(self.vb)
         self.image_item = pg.ImageItem()
+        self.image_item.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemClipsChildrenToShape)
         self.vb.addItem(self.image_item)
+        self.field_items: list[pg.PlotCurveItem] = []   # Wavefront's field: children of the image, clipped to it
+        self.no_go_items = []                           # outside its square: a light red veil, then red hatching
+        for alpha, style in ((40, QtCore.Qt.BrushStyle.SolidPattern), (150, QtCore.Qt.BrushStyle.BDiagPattern)):
+            colour = QtGui.QColor(NO_GO)
+            colour.setAlpha(alpha)
+            item = QtWidgets.QGraphicsPathItem(self.image_item)
+            item.setBrush(QtGui.QBrush(colour, style))
+            item.setPen(QtGui.QPen(QtCore.Qt.PenStyle.NoPen))
+            item.setZValue(-1)                          # under the outline, over the image
+            item.setVisible(False)
+            self.no_go_items.append(item)
         self.spot_item = pg.ScatterPlotItem(pxMode=False, symbol="o", pen=None, brush=pg.mkBrush(SPOT))
         self.spot_item.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)     # clicks go to the view
         self.vb.addItem(self.spot_item)
+        self.slm_item = pg.ScatterPlotItem(pxMode=False, symbol="o", pen=pg.mkPen(SLM_RING, width=3),
+                                           brush=pg.mkBrush(None))
+        self.slm_label = pg.TextItem("SLM", color=SLM_RING, anchor=(0.5, 0.0))
+        self.slm_label.setFont(QtGui.QFont("Segoe UI", 10, QtGui.QFont.Weight.Bold))
+        for item in (self.slm_item, self.slm_label):
+            item.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            item.setZValue(10)                          # above the spots, below their numbers
+            self.vb.addItem(item)
+        self.slm_label.hide()
         self.labels: list[pg.TextItem] = []
         self.scene().sigMouseMoved.connect(self._on_mouse)
 
     def set_image(self, image: np.ndarray):
         lo, hi = np.percentile(image, [1, 99.7])
         self.image_item.setImage(image, levels=(lo, hi if hi > lo else lo + 1))
-        self.vb.autoRange()
+        self.vb.autoRange(items=[self.image_item])
 
     def show_placeholder(self):
         self.image_item.setImage(camera_target(), levels=(0, 255))
-        self.vb.autoRange()
+        self.vb.autoRange(items=[self.image_item])
+
+    def set_field(self, lines):
+        """Wavefront's field outline, [(kind, (N, 2) image px polyline)], drawn on the image and clipped to it, the
+        image outside the "square" hatched as a no-go zone; None hides it."""
+        lines = lines or []
+        while len(self.field_items) < len(lines):
+            item = pg.PlotCurveItem()
+            item.setParentItem(self.image_item)
+            self.field_items.append(item)
+        for k, item in enumerate(self.field_items):
+            if k < len(lines):
+                kind, pts = lines[k]
+                item.setData(pts[:, 0], pts[:, 1], pen=FIELD_PENS[kind])
+            item.setVisible(k < len(lines))
+        square = next((pts for kind, pts in lines if kind == "square"), None)
+        if square is not None:
+            outside = QtGui.QPainterPath()
+            outside.setFillRule(QtCore.Qt.FillRule.OddEvenFill)        # the image minus the square
+            outside.addRect(self.image_item.boundingRect().adjusted(-1, -1, 1, 1))
+            outside.addPolygon(QtGui.QPolygonF([QtCore.QPointF(x, y) for x, y in square]))
+            for item in self.no_go_items:
+                item.setPath(outside)
+        for item in self.no_go_items:
+            item.setVisible(square is not None)
 
     def set_spots(self, spots, diameter_px: float):
         for lbl in self.labels:
@@ -270,9 +350,21 @@ class ImageView(pg.GraphicsLayoutWidget):
             lbl = pg.TextItem(str(k + 1), color=SPOT, anchor=(0.5, 1.0))
             lbl.setFont(QtGui.QFont("Segoe UI", 11, QtGui.QFont.Weight.Bold))
             lbl.setAcceptedMouseButtons(QtCore.Qt.MouseButton.NoButton)
+            lbl.setZValue(20)
             lbl.setPos(x, y - diameter_px / 2)
             self.vb.addItem(lbl)
             self.labels.append(lbl)
+
+    def set_slm_spot(self, xy, diameter_px: float = 0.0):
+        """Ring around the spot whose phase mask is on the SLM; None hides it."""
+        if xy is None:
+            self.slm_item.clear()
+            self.slm_label.hide()
+            return
+        ring = diameter_px + 26
+        self.slm_item.setData(pos=[xy], size=ring)
+        self.slm_label.setPos(xy[0], xy[1] + ring / 2)
+        self.slm_label.show()
 
     def _on_mouse(self, pos):
         if self.vb.sceneBoundingRect().contains(pos):
@@ -322,9 +414,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.dragging: int | None = None                # spot being dragged
         self.help_dialog: QtWidgets.QDialog | None = None
         self.last_spot_bin: Path | None = None
+        self.slm_spot: dict | None = None               # where the mask loaded on the SLM was clicked
         self.shutter = Shutter(config.nidaq_device, config.shutter_ao)
         self.jobs: list[tuple[str, str, Path]] = []      # phase masks still to compute
         self.generation: dict | None = None
+        self.attempt = 1                                # sends of the current mask script
+        self.job_t0 = 0.0
+        self.job_taken_t: float | None = None           # when Wavefront took the current mask script
+        self.cleanup: dict | None = None                # aborted generation, swept once Wavefront is done
+        self.load: dict | None = None                   # Load waiting for Wavefront: name, js, attempt
         self._load_t0 = 0.0
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(100)
@@ -431,8 +529,9 @@ class MainWindow(QtWidgets.QMainWindow):
         col.addWidget(self.edit_wfd_root)
         self.lbl_script_dir, self.btn_sweep_scripts = self._derived_folder(
             col, "script folder", "Sweep the script folder clean", self.sweep_script_folder)
-        self.lbl_output_dir, self.btn_sweep_masks = self._derived_folder(
-            col, "phase mask folder", "Sweep the phase mask folder clean (asks first)", self.sweep_mask_folder)
+        self.lbl_output_dir, self.btn_open_masks, self.btn_sweep_masks = self._derived_folder(
+            col, "phase mask folder", "Sweep the phase mask folder clean (asks first)", self.sweep_mask_folder,
+            self.open_mask_folder)
         self._show_wavefront_dirs()
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("shutter"))
@@ -446,6 +545,12 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.edit_device, stretch=1)
         row.addWidget(self.spin_ao)
         col.addLayout(row)
+        self.chk_slm_field = QtWidgets.QCheckBox("SLM field on the image")
+        self.chk_slm_field.setToolTip("Wavefront's square, the no-go zone outside it, its 20 % and 90 % power circles "
+                                      "and its centre")
+        self.chk_slm_field.setChecked(self.config.show_slm_field)
+        self.chk_slm_field.toggled.connect(self._on_slm_field)
+        col.addWidget(self.chk_slm_field)
         right.addWidget(setup)
         self.lbl_image_warning = QtWidgets.QLabel()
         self.lbl_image_warning.setWordWrap(True)
@@ -480,13 +585,13 @@ class MainWindow(QtWidgets.QMainWindow):
         right.addWidget(manual)
         right.addStretch(1)
         self.btn_generate = _action_button("GENERATE PHASE MASKS")
-        self.btn_generate.clicked.connect(self.generate)
+        self.btn_generate.clicked.connect(lambda: self.stop_generation() if self.jobs else self.generate())
         right.addWidget(self.btn_generate)
         cols.addWidget(_card(right, "holoCard", HOLO_COLOUR, 290))
         self._show_shutter()
         self.watcher = QtCore.QFileSystemWatcher(self)        # mask list and button follow the folder
         self.watcher.directoryChanged.connect(lambda _: self.refresh_masks())
-        self._watch_output_dir()
+        self._watch_folders()
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -497,22 +602,34 @@ class MainWindow(QtWidgets.QMainWindow):
         root.addWidget(self.log_view)
 
     @staticmethod
-    def _derived_folder(col: QtWidgets.QVBoxLayout, label: str, tip: str, sweep):
-        """Read-only path of a folder inside the Wavefront folder, with its broom."""
+    def _derived_folder(col: QtWidgets.QVBoxLayout, label: str, tip: str, sweep, open_folder=None):
+        """Read-only path of a folder inside the Wavefront folder, with its broom (and 📂 to open it)."""
         col.addWidget(QtWidgets.QLabel(label))
         row = QtWidgets.QHBoxLayout()
         path = QtWidgets.QLineEdit()
         path.setReadOnly(True)
         path.setStyleSheet("color: #9A9A9A;")
-        btn = QtWidgets.QPushButton("🧹")
-        btn.setFixedWidth(30)
-        btn.setStyleSheet("padding: 2px 0; font: 12pt 'Segoe UI Emoji';")
-        btn.setToolTip(tip)
-        btn.clicked.connect(sweep)
         row.addWidget(path, stretch=1)
-        row.addWidget(btn)
+        buttons = []
+        for text, slot, button_tip in (("📂", open_folder, "Open it in the file explorer"), ("🧹", sweep, tip)):
+            if slot is None:
+                continue
+            btn = QtWidgets.QPushButton(text)
+            btn.setFixedWidth(30)
+            btn.setStyleSheet("padding: 2px 0; font: 12pt 'Segoe UI Emoji';")
+            btn.setToolTip(button_tip)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+            buttons.append(btn)
         col.addLayout(row)
-        return path, btn
+        return (path, *buttons)
+
+    def open_mask_folder(self):
+        folder = Path(self.config.wfd_output_dir)
+        if not folder.is_dir():
+            self.log(f"folder not found: {folder}", "warn")
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(folder)))
 
     def _show_wavefront_dirs(self):
         for edit, folder in ((self.lbl_script_dir, self.config.wfd_script_dir),
@@ -537,7 +654,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.help_dialog.raise_()
 
     def log(self, text: str, level: str = "info"):
-        self.log_view.appendHtml(f'<span style="color:{LOG_COLOURS[level]}">'
+        big = "; font-size: 14pt; font-weight: bold" if level == "alarm" else ""
+        self.log_view.appendHtml(f'<span style="color:{LOG_COLOURS[level]}{big}">'
                                  f'{_dt.datetime.now():%H:%M:%S}  {html.escape(text)}</span>')
 
     def save_config(self):
@@ -562,6 +680,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Show a camera image (from a file now; Micro-Manager snap / live later)."""
         self.image = np.asarray(image, dtype=np.float32)
         self.view.set_image(self.image)
+        self.redraw_field()
         h, w = self.image.shape
         self.log(f"image {Path(source).name or 'set'}: {w} x {h} px")
         if (w, h) != EPI_SIZE:
@@ -635,12 +754,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spots = []
             self.redraw_spots()
 
-    def diameter_px(self) -> float:
+    def diameter_px(self, diameter_um: float | None = None) -> float:
         px_um = (self.config.visual.px_um + self.config.holo.px_um) / 2
-        return self.spin_diam.value() / max(px_um, 1e-6)
+        return (self.spin_diam.value() if diameter_um is None else diameter_um) / max(px_um, 1e-6)
 
     def redraw_spots(self):
         self.view.set_spots(self.spots, self.diameter_px())
+        s = self.slm_spot
+        self.view.set_slm_spot(None if s is None else (s["x_px"], s["y_px"]),
+                               0.0 if s is None else self.diameter_px(s["diameter_um"]))
         self.lbl_count.setText(f"{len(self.spots)} spot{'s' if len(self.spots) != 1 else ''}  ")
 
     def _on_diameter(self, value: float):
@@ -651,6 +773,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config.visual_cal = self.visual_box.calibration().to_dict()
         self.config.holo_cal = self.holo_box.calibration().to_dict()
         self.redraw_spots()
+        self.redraw_field()
+
+    def _on_slm_field(self, show: bool):
+        self.config.show_slm_field = show
+        self.save_config()
+        self.redraw_field()
+
+    def redraw_field(self):
+        """Wavefront's field on the image, through the holo calibration: its square in red, the image outside it
+        hatched red (no-go zone), its 20 % efficiency circle in orange dashes, its 90 % one in yellow, its centre
+        cross in light grey."""
+        if self.image is None or not self.config.show_slm_field:
+            self.view.set_field(None)
+            return
+        cal, shape = self.config.holo, self.image.shape
+        self.view.set_field([(kind, cal.from_um(pts, shape)) for kind, pts in holo.field_outline()])
 
     def _on_mouse(self, x: float, y: float):
         if self.image is None:
@@ -726,18 +864,18 @@ class MainWindow(QtWidgets.QMainWindow):
     def client(self) -> holo.WavefrontClient:
         return holo.WavefrontClient(self.config.wfd_script_dir)
 
-    def _purge_scripts(self) -> bool:
+    def _purge_scripts(self, quiet: bool = False) -> bool:
         try:
             removed = self.client().purge()
         except OSError as e:
             self.log(f"cannot empty the script folder: {e}", "error")
             return False
-        if removed:
+        if removed and not quiet:
             self.log(f"script folder purged ({', '.join(removed)} left there by Wavefront)", "warn")
         return True
 
     def sweep_script_folder(self):
-        if self.jobs:
+        if self.jobs or self.cleanup is not None:
             self.log("not now: Wavefront is computing masks from that folder", "warn")
             return
         try:
@@ -748,19 +886,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log(f"🧹 script folder swept clean ({', '.join(removed)})" if removed else "🧹 script folder already clean")
 
     def sweep_mask_folder(self):
-        if self.jobs:
+        if self.jobs or self.cleanup is not None:
             self.log("not now: Wavefront is saving masks in that folder", "warn")
             return
         folder = Path(self.config.wfd_output_dir)
-        files = [p for p in folder.iterdir() if p.is_file()] if folder.is_dir() else []
+        files = holo.files_in(folder)
         if not files:
             self.log("🧹 phase mask folder already clean")
             return
-        first, last = holo.date_range(files)
-        dates = f"{first:%Y %m %d}" if first == last else f"{first:%Y %m %d} – {last:%Y %m %d}"
         answer = QtWidgets.QMessageBox.question(
             self, "Sweep the phase mask folder",
-            f"Delete the {len(files)} files ({len(holo.available_masks(folder))} masks, dated {dates}) in\n"
+            f"Delete the {len(files)} files ({len(holo.available_masks(folder))} masks, dated {_dates(files)}) in\n"
             f"{folder}?")
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
@@ -773,105 +909,257 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_masks()
 
     def refresh_masks(self):
-        """Mask numbers found in the phase mask folder; Generate turns yellow while the folder holds masks."""
+        """Mask numbers found in the phase mask folder; Generate is STOP while generating, locked while cleaning
+        up after an abort, yellow while a Wavefront folder is not empty."""
         out_dir = self.config.wfd_output_dir
         current = self.combo_mask.currentText()
         self.combo_mask.clear()
         self.combo_mask.addItems([str(n) for n in holo.available_masks(out_dir)])
         if self.combo_mask.findText(current) >= 0:
             self.combo_mask.setCurrentText(current)
-        self.btn_load_mask.setEnabled(self.combo_mask.count() > 0 and not self.jobs)
-        blocked = bool(holo.old_masks(out_dir))
+        self.btn_load_mask.setEnabled(self.combo_mask.count() > 0 and not self.jobs and self.cleanup is None)
+        self.btn_generate.setEnabled(self.cleanup is None)
+        if self.cleanup is not None:
+            self.btn_generate.setText("CLEANING UP…")      # poll() counts the seconds down
+            self.btn_generate.setToolTip("waiting for Wavefront to finish before sweeping")
+            return
+        if self.jobs:
+            self.btn_generate.setText("■ STOP")
+            self.btn_generate.setStyleSheet(STOP_STYLE)
+            self.btn_generate.setToolTip("stop the generation (both Wavefront folders are emptied after it)")
+            return
+        blocked = bool(holo.files_in(self.config.wfd_script_dir) or holo.files_in(out_dir))
+        self.btn_generate.setText("GENERATE PHASE MASKS")
         self.btn_generate.setStyleSheet(BLOCKED_STYLE if blocked else ACTION_STYLE)
-        self.btn_generate.setToolTip("the phase mask folder is not empty" if blocked else "")
+        self.btn_generate.setToolTip("a Wavefront folder is not empty: Generate asks to sweep it" if blocked else "")
 
-    def _watch_output_dir(self):
+    def _watch_folders(self):
         if self.watcher.directories():
             self.watcher.removePaths(self.watcher.directories())
-        if Path(self.config.wfd_output_dir).is_dir():
-            self.watcher.addPath(self.config.wfd_output_dir)
+        for folder in (self.config.wfd_script_dir, self.config.wfd_output_dir):
+            if Path(folder).is_dir():
+                self.watcher.addPath(folder)
 
     def generate(self):
-        if self.jobs:
+        if self.jobs or self.cleanup is not None:
             self.log("Wavefront is still computing the previous masks", "warn")
             return
         out_dir = Path(self.config.wfd_output_dir)
         if not out_dir.is_dir() or not self.client().script_dir.is_dir():
             self.log(f"Wavefront folders not found ({self.config.wfd_script_dir}, {out_dir})", "error")
             return
-        if not self._purge_scripts():
-            return
-        old = holo.old_masks(out_dir)
-        if old:
-            first, last = holo.date_range(old)
-            dates = f"{first:%Y %m %d}" if first == last else f"{first:%Y %m %d} – {last:%Y %m %d}"
-            names = sorted({p.name.split("_000.")[0] for p in old}, key=holo.natural_key)
-            self.log(f"not generating: the phase mask folder is not empty ({len(names)} masks, {names[0]} … "
-                     f"{names[-1]}, dated {dates}); empty {out_dir} first", "error")
-            return
-        if not self._have_spots():
+        if not self._have_spots() or not self._sweep_before_generating():
             return
         cal, d = self.config.holo, self.spin_diam.value()
         spots_um = cal.to_um(self.spots, self.image.shape)
+        fits = [holo.field_fit(x, y, d) for x, y in spots_um]
+        outside = [k for k, fit in enumerate(fits) if fit != "in"]
+        off = [f"spot {k + 1}{' partly' if fits[k] == 'partly' else ''} at ({spots_um[k][0]:.1f}, "
+               f"{spots_um[k][1]:.1f}) µm" for k in outside]
+        if off:
+            choice = self._choose(
+                "Generate phase masks",
+                f"Outside the SLM field (Wavefront: ±{holo.FIELD_HALF_UM} µm):\n\n" + "\n".join(f"• {s}" for s in off) +
+                "\n\nTheir masks would hold no spot, or a cut one. A right click on a spot removes it; Remove spots "
+                "removes them all (Undo brings them back) and generates the others.",
+                {"remove": "Remove spots and generate", "anyway": "Generate anyway"})
+            if choice is None:
+                self.log(f"not generating: {', '.join(off)} outside the SLM field (a right click on a spot removes "
+                         f"it)", "warn")
+                return
+            if choice == "remove":
+                self._push_undo()
+                self.spots = [p for k, p in enumerate(self.spots) if k not in outside]
+                self.redraw_spots()
+                self.log(f"removed {', '.join(f'spot {k + 1}' for k in outside)}: outside the SLM field (Undo brings "
+                         f"them back)", "warn")
+                if not self.spots:
+                    self.log("not generating: no spot left in the SLM field", "warn")
+                    return
+                spots_um = cal.to_um(self.spots, self.image.shape)
+                fits, off = ["in"] * len(self.spots), []
         names = [holo.mask_name(k + 1) for k in range(len(spots_um))]
         self.jobs = [(name, holo.mask_script(name, x, y, d), holo.mask_png(out_dir, name))
                      for name, (x, y) in zip(names, spots_um)]
         self.generation = {"spots_px": list(self.spots), "spots_um": spots_um, "diameter": d, "cal": cal,
-                           "total": len(self.jobs)}
-        self.btn_generate.setEnabled(False)
-        self.btn_load_mask.setEnabled(False)
+                           "names": names, "fits": fits}
+        if off:
+            self.log(f"⚠ OUTSIDE THE SLM FIELD (Wavefront: ±{holo.FIELD_HALF_UM} µm): {', '.join(off)}. Their masks "
+                     f"hold no spot or a cut one; generating anyway", "alarm")
+        self.load = None                                # a Load still waiting is dropped: its script was purged
+        self.slm_spot = None                            # Wavefront computes on the SLM: no longer the loaded mask
+        self.redraw_spots()
+        self.refresh_masks()                            # Generate becomes STOP, Load is disabled
+        self.attempt = 1
         self._submit()
+
+    def _choose(self, title: str, text: str, choices: dict[str, str]) -> str | None:
+        """A warning with a button per choice ({key: label}) and Cancel, the default: the key clicked, or None."""
+        box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Warning, title, text, parent=self)
+        buttons = {box.addButton(label, QtWidgets.QMessageBox.ButtonRole.AcceptRole): key
+                   for key, label in choices.items()}
+        box.setDefaultButton(box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel))
+        box.exec()
+        return buttons.get(box.clickedButton())
+
+    def _sweep_before_generating(self) -> bool:
+        """Both Wavefront folders must be empty: a warning says what is left and sweeps it on a yes."""
+        scripts, files = holo.files_in(self.config.wfd_script_dir), holo.files_in(self.config.wfd_output_dir)
+        if not scripts and not files:
+            return True
+        left = []
+        if scripts:
+            left.append(f"script folder: {', '.join(p.name for p in scripts)} (not taken by Wavefront: is auto load "
+                        f"on?)")
+        if files:
+            left.append(f"phase mask folder: {_n(len(files), 'file')} "
+                        f"({_n(len(holo.available_masks(self.config.wfd_output_dir)), 'mask')}), dated {_dates(files)}")
+        self.log(f"Wavefront folders not empty: {'; '.join(left)}", "warn")
+        yes, cancel = QtWidgets.QMessageBox.StandardButton.Yes, QtWidgets.QMessageBox.StandardButton.Cancel
+        answer = QtWidgets.QMessageBox.warning(
+            self, "Generate phase masks",
+            "These Wavefront folders are not empty:\n\n" + "\n".join(f"• {line}" for line in left) +
+            "\n\nSweep them and generate?", yes | cancel, cancel)
+        if answer != yes:
+            self.log("not generating: the Wavefront folders must be empty", "warn")
+            return False
+        try:
+            swept = holo.empty_folder(self.config.wfd_script_dir) + holo.empty_folder(self.config.wfd_output_dir)
+        except OSError as e:
+            self.log(f"cannot sweep the Wavefront folders: {e}", "error")
+            return False
+        still = holo.files_in(self.config.wfd_script_dir) + holo.files_in(self.config.wfd_output_dir)
+        if still:                                       # written again at once: Wavefront is still busy
+            self.log(f"not generating: {', '.join(p.name for p in still)} back in the Wavefront folders right after "
+                     f"the sweep (Wavefront still saving?)", "error")
+            return False
+        self.log(f"🧹 Wavefront folders swept ({_n(len(swept), 'file')})")
+        return True
 
     def _submit(self):
         name, js, _ = self.jobs[0]
         try:
             self.client().submit(js)
         except Exception as e:  # noqa: BLE001
-            self._finish(f"cannot send {name}: {e}", "error")
+            self._abort(f"cannot send the {name} script: {e}")
             return
         self.job_t0 = time.time()
-        self.job_taken = False
-        self.job_warned = False
+        self.job_taken_t = None
         self.timer.start()
-        self.log(f"Wavefront: computing {name} ({self.generation['total'] - len(self.jobs) + 1}/"
-                 f"{self.generation['total']})")
+        names = self.generation["names"]
+        again = f", attempt {self.attempt}/{holo.MAX_ATTEMPTS}" if self.attempt > 1 else ""
+        self.log(f"Wavefront: computing {name} ({names.index(name) + 1} of {len(names)}{again})")
 
     def poll(self):
-        """Next mask once Wavefront took the script and (re)wrote the png of the current one."""
+        """Next script once Wavefront took this one and saved its mask (with the right spot); else this one again."""
+        if self.cleanup is not None:
+            self._clean_up()
+            return
         if not self.jobs:
             self.timer.stop()
             return
         name, _, png = self.jobs[0]
-        waited = time.time() - self.job_t0
-        if not self.job_taken:
+        now = time.time()
+        if self.job_taken_t is None:
             if self.client().busy:
-                if waited > holo.TIMEOUT_S:
-                    self._finish(f"Wavefront did not take the script within {waited:.0f} s; {AUTOLOAD_HINT}",
-                                 "error")
-                elif waited > holo.NOT_READ_S and not self.job_warned:
-                    self.job_warned = True
-                    self.log(f"the script is not being used by Wavefront: {AUTOLOAD_HINT}", "warn")
+                if now - self.job_t0 > holo.NOT_READ_S:
+                    self._retry(f"Wavefront did not take the {name} script within {holo.NOT_READ_S:.0f} s",
+                                f"{AUTOLOAD_HINT}, or restart Wavefront IV")
                 return
-            self.job_taken = True
-        if png.exists() and png.stat().st_mtime >= self.job_t0 - 1:
-            self.jobs.pop(0)
-            if self.jobs:
-                self._submit()
-            else:
-                g = self.generation
-                rec = holo.write_spot_record(self.config.wfd_output_dir, g["spots_px"], g["spots_um"],
-                                             g["diameter"], g["cal"])
-                self._finish(f"{g['total']} phase masks saved in {self.config.wfd_output_dir} "
-                             f"(spot i = {holo.PREFIX}i; {rec.name})")
-        elif waited > holo.TIMEOUT_S:
-            self._finish(f"{png.name} did not appear within {waited:.0f} s: is {png.parent} the folder "
-                         f"Wavefront saves to?", "error")
+            self.job_taken_t = now
+        if holo.mask_saved(png, self.job_t0):
+            g = self.generation
+            k = g["names"].index(name)
+            (x, y), d = g["spots_um"][k], g["diameter"]
+            # a spot (partly) outside the field was said at Generate: nothing to check on its mask
+            drawn = holo.drawn_spot(self.config.wfd_output_dir, name, d) if g["fits"][k] == "in" else None
+            if drawn is not None and math.isnan(drawn[0]):
+                self.log(f"⚠ {name} HOLDS NO SPOT: Wavefront drew nothing for spot {k + 1} at ({x:.1f}, {y:.1f}) µm "
+                         f"(outside its field?)", "alarm")
+            elif drawn is not None and holo.off_spot(drawn, x, y, d):
+                self._abort(f"{name} holds a spot drawn at ({drawn[0]:.1f}, {drawn[1]:.1f}) µm, not at ({x:.1f}, "
+                            f"{y:.1f}) µm (spot {k + 1})", "restart Wavefront IV and generate again")
+                return
+            self._next_job()
+        elif now - self.job_taken_t > holo.MASK_WAIT_S:
+            self._retry(f"Wavefront took the {name} script but did not save {png.name} within "
+                        f"{holo.MASK_WAIT_S:.0f} s", "restart Wavefront IV and generate again")
+
+    def _next_job(self):
+        self.jobs.pop(0)
+        self.attempt = 1
+        if self.jobs:
+            self._submit()
+            return
+        g = self.generation
+        rec = holo.write_spot_record(self.config.wfd_output_dir, g["spots_px"], g["spots_um"], g["diameter"], g["cal"])
+        self._finish(f"{_n(len(g['names']), 'phase mask')} saved in {self.config.wfd_output_dir} "
+                     f"(spot i = {holo.PREFIX}i, each checked against its drawn spot; {rec.name})")
+
+    def _retry(self, problem: str, fix: str):
+        """Erase the script and send the same one again, MAX_ATTEMPTS sends in all; then abort."""
+        self.timer.stop()
+        problem += f" (attempt {self.attempt}/{holo.MAX_ATTEMPTS})"
+        if self._purge_scripts(quiet=True) and self.attempt < holo.MAX_ATTEMPTS:
+            self.log(f"{problem}: script erased, sending it again", "warn")
+            self.attempt += 1
+            self._submit()
+        else:
+            self._abort(problem, fix)
+
+    def stop_generation(self):
+        if self.jobs:
+            self._abort("STOP pressed", level="warn")
+
+    def _abort(self, reason: str, fix: str = "", level: str = "error"):
+        """Send nothing more; ABORT_WAIT_S later (Wavefront may still be computing) _clean_up sweeps."""
+        self.cleanup = {"t0": time.time(), "fix": fix, "level": level, "sweeps": 0, "swept": []}
+        self.jobs = []
+        self.generation = None
+        self.log(f"{reason}: generation aborted; cleaning up in {holo.ABORT_WAIT_S:.0f} s, Wavefront may still be "
+                 f"computing", level)
+        self.refresh_masks()
+        self.timer.start()
+
+    def _clean_up(self, wait: bool = True):
+        """Back to the normal state: both Wavefront folders empty (they were when the generation started), Generate
+        ready. Swept ABORT_WAIT_S after the abort, then every second while a file is left (Wavefront still saving,
+        a file still open), MAX_SWEEPS sweeps at most."""
+        c = self.cleanup
+        left = c["t0"] + holo.ABORT_WAIT_S - time.time()
+        if wait and left > 0:
+            self.btn_generate.setText(f"CLEANING UP IN {math.ceil(left)} s")
+            return
+        folders = (self.config.wfd_script_dir, self.config.wfd_output_dir)
+        for p in holo.files_in(folders[0]) + holo.files_in(folders[1]):
+            try:
+                p.unlink()
+                c["swept"].append(p.name)
+            except OSError:
+                pass
+        c["sweeps"] += 1
+        still = holo.files_in(folders[0]) + holo.files_in(folders[1])
+        if still and wait and c["sweeps"] < holo.MAX_SWEEPS:
+            c["t0"] = time.time() + 1 - holo.ABORT_WAIT_S   # not empty yet: sweep again in 1 s
+            self.btn_generate.setText("CLEANING UP…")
+            return
+        self.timer.stop()
+        self.cleanup = None
+        fix = f"; {c['fix']}" if c["fix"] else ""
+        if still:
+            self.log(f"cleanup after the abort incomplete: {', '.join(p.name for p in still)} still in the Wavefront "
+                     f"folders after {_n(c['sweeps'], 'sweep')}: sweep them with the 🧹{fix}", "error")
+        else:
+            again = f" ({c['sweeps']} sweeps)" if c["sweeps"] > 1 else ""
+            files = f": {', '.join(c['swept'])}" if c["swept"] else ""
+            self.log(f"cleaned up after the abort{again}: both Wavefront folders emptied "
+                     f"({_n(len(c['swept']), 'file')}{files}){fix}", c["level"])
+        self.refresh_masks()
 
     def _finish(self, message: str, level: str = "info"):
         self.timer.stop()
         self.jobs = []
         self.generation = None
-        self.btn_generate.setEnabled(True)
         self.log(message, level)
         self.refresh_masks()
 
@@ -879,23 +1167,51 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.combo_mask.currentText():
             self.log(f"no {holo.PREFIX}<n> mask in {self.config.wfd_output_dir}", "warn")
             return
-        name = holo.mask_name(int(self.combo_mask.currentText()))
+        n = int(self.combo_mask.currentText())
+        name = holo.mask_name(n)
         png = holo.mask_png(self.config.wfd_output_dir, name)
         if not self._purge_scripts():
             return
-        try:
-            self.client().submit(holo.load_script(png))
-        except Exception as e:  # noqa: BLE001
-            self.log(f"cannot load {name}: {e}", "error")
+        self.load = {"name": name, "js": holo.load_script(png), "attempt": 1}
+        if not self._send_load():
             return
         self.log(f"SLM: loading {name}")
+        self.slm_spot = holo.recorded_spot(self.config.wfd_output_dir, n)
+        if self.slm_spot is None:
+            self.log(f"{name} is not in an up to date {holo.RECORD_NAME}: its spot cannot be shown on the image",
+                     "warn")
+        self.redraw_spots()
+
+    def _send_load(self) -> bool:
+        try:
+            self.client().submit(self.load["js"])
+        except Exception as e:  # noqa: BLE001
+            self.log(f"cannot load {self.load['name']}: {e}", "error")
+            self.load = None
+            return False
         self._load_t0 = time.time()
         QtCore.QTimer.singleShot(int(holo.NOT_READ_S * 1000) + 100, self.check_load_taken)
+        return True
 
     def check_load_taken(self):
-        """A load script still in the folder after NOT_READ_S: Wavefront is not reading the folder."""
-        if self.client().busy and time.time() - self._load_t0 >= holo.NOT_READ_S:
-            self.log(f"the script is not being used by Wavefront: {AUTOLOAD_HINT}", "warn")
+        """A load script still in the folder after NOT_READ_S is erased and sent again, MAX_ATTEMPTS sends in all."""
+        if self.load is None or time.time() - self._load_t0 < holo.NOT_READ_S:
+            return                                      # taken, dropped, or sent again since
+        if not self.client().busy:
+            self.load = None                            # Wavefront took it
+            return
+        name, attempt = self.load["name"], self.load["attempt"]
+        problem = (f"Wavefront did not take the script loading {name} within {holo.NOT_READ_S:.0f} s "
+                   f"(attempt {attempt}/{holo.MAX_ATTEMPTS})")
+        if self._purge_scripts(quiet=True) and attempt < holo.MAX_ATTEMPTS:
+            self.log(f"{problem}: script erased, sending it again", "warn")
+            self.load["attempt"] += 1
+            self._send_load()
+            return
+        self.load = None
+        self.slm_spot = None                            # not loaded: what the SLM shows is unknown
+        self.redraw_spots()
+        self.log(f"{problem}: {name} not loaded; {AUTOLOAD_HINT}, or restart Wavefront IV", "error")
 
     # ------------------------------------------------------------------ shutter
     def open_shutter(self):
@@ -937,7 +1253,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for d in (self.config.wfd_script_dir, self.config.wfd_output_dir):
             if not Path(d).is_dir():
                 self.log(f"folder not found: {d}", "warn")
-        self._watch_output_dir()
+        self._watch_folders()
         self.refresh_masks()
 
     def _on_shutter_output(self, *_):
@@ -950,6 +1266,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.shutter = Shutter(self.config.nidaq_device, self.config.shutter_ao)
 
     def closeEvent(self, ev):
+        if self.jobs:
+            self._abort("window closed", level="warn")
+        if self.cleanup is not None:
+            self._clean_up(wait=False)                  # the window is closing: sweep now
         if self.shutter.is_open:
             self.close_shutter()
         self.timer.stop()

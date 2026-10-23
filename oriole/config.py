@@ -25,6 +25,7 @@ class Config:
     wfd_root: str = r"E:\wfdIV_20261022"    # Wavefront IV folder, holding script\ and GeneratedPhasemasks\
     nidaq_device: str = "Dev1"     # NI-DAQ device driving the shutter (as in Plerion)
     shutter_ao: int = 0            # its analog output channel
+    show_slm_field: bool = True    # Wavefront's field (square, no-go zone, power circles) drawn on the image
     path: str = field(default="", compare=False)   # where this config is saved (not serialised)
 
     @property
