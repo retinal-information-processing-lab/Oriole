@@ -55,7 +55,10 @@ spot and 2(i−1)+1 its negative; a <code>.json</code> lists the frames.<br>
 new frame numbers).</p>
 <h3>Holo · SLM</h3>
 <p><b>Wavefront folder</b>: the Wavefront IV install (<code>wfdIV.exe</code>); scripts go to its
-<code>script\\</code>, masks are read from its <code>GeneratedPhasemasks\\</code>; 🧹 sweeps a folder clean, 📂 opens
+<code>script\\</code>, masks are read from its <code>GeneratedPhasemasks\\</code>; 🧹 sweeps a folder clean (only the files
+Wavefront and Oriole write there, <code>Pattern&lt;n&gt;_000.*</code>, <code>Pattern_spots.json</code>, <code>*.js</code>; anything else
+is left alone, and a folder that is not a <code>script</code> or <code>GeneratedPhasemasks</code> folder of a Wavefront install is
+never swept), 📂 opens
 the phase mask folder in the file explorer. After a new install (its licence expired: the <b>?</b> next to it
 says how), pick its folder.<br>
 Under it, Wavefront's state. <b>Start</b> starts it from that folder in script mode (set in its settings,
@@ -763,33 +766,55 @@ class MainWindow(QtWidgets.QMainWindow):
     def _wavefront_folders(self) -> tuple[str, str]:
         return self.config.wfd_script_dir, self.config.wfd_output_dir
 
+    def _sweep(self, *folders, report: bool = True) -> holo.Swept | None:
+        """holo.sweep: a refused folder (nothing deleted) logged in red and None; ``report`` the files it left alone
+        (not Wavefront's nor Oriole's)."""
+        try:
+            done = holo.sweep(*folders)
+        except holo.UnsafeSweep as e:
+            self.log(f"refused to sweep: {e}; nothing deleted", "error")
+            return None
+        if done.foreign and report:
+            self.log(f"left alone (not Oriole's or Wavefront's): {_names(done.foreign)}", "warn")
+        return done
+
     def _purge_scripts(self, quiet: bool = False) -> bool:
-        """Empty the script folder before sending a script; False if a file could not be deleted."""
-        swept, left = holo.sweep(self.config.wfd_script_dir)
-        if left:
-            self.log(f"cannot empty the script folder: {_names(left)} left (in use?)", "error")
+        """Empty the script folder before sending a script; False if it could not be."""
+        done = self._sweep(self.config.wfd_script_dir, report=not quiet)
+        if done is None:
             return False
-        if swept and not quiet:
-            self.log(f"script folder purged ({', '.join(swept)} left there by Wavefront)", "warn")
+        if done.left:
+            self.log(f"cannot empty the script folder: {_names(done.left)} left (in use?)", "error")
+            return False
+        if done.swept and not quiet:
+            self.log(f"script folder purged ({', '.join(done.swept)} left there by Wavefront)", "warn")
         return True
 
     def sweep_script_folder(self):
         if self.computing:
             self.log("not now: Wavefront is computing masks from that folder", "warn")
             return
+        done = self._sweep(self.config.wfd_script_dir)
+        if done is None:
+            return
         self.jobs = []                                  # a Load or a check still waiting goes with its script
-        swept, left = holo.sweep(self.config.wfd_script_dir)
-        if left:
-            self.log(f"cannot empty the script folder: {_names(left)} left (in use?)", "error")
+        if done.left:
+            self.log(f"cannot empty the script folder: {_names(done.left)} left (in use?)", "error")
         else:
-            self.log(f"🧹 script folder swept clean ({', '.join(swept)})" if swept else "🧹 script folder already clean")
+            self.log(f"🧹 script folder swept clean ({', '.join(done.swept)})" if done.swept
+                     else "🧹 script folder already clean")
 
     def sweep_mask_folder(self):
         if self.computing:
             self.log("not now: Wavefront is saving masks in that folder", "warn")
             return
         folder = self.config.wfd_output_dir
-        files = holo.files_in(folder)
+        try:
+            holo.sweep_rule(folder)
+        except holo.UnsafeSweep as e:
+            self.log(f"refused to sweep: {e}; nothing deleted", "error")
+            return
+        files = holo.oriole_files(folder)
         if not files:
             self.log("🧹 phase mask folder already clean")
             return
@@ -797,10 +822,12 @@ class MainWindow(QtWidgets.QMainWindow):
                         f"Delete the {len(files)} files ({len(holo.available_masks(folder))} masks, dated "
                         f"{holo.file_dates(files)}) in\n{folder}?", {"delete": "Delete them"}) is None:
             return
-        swept, left = holo.sweep(folder)
-        self.log(f"🧹 phase mask folder swept clean ({_n(len(swept), 'file')})")
-        if left:
-            self.log(f"cannot empty {folder}: {_names(left)} left (in use?)", "error")
+        done = self._sweep(folder)
+        if done is None:
+            return
+        self.log(f"🧹 phase mask folder swept clean ({_n(len(done.swept), 'file')})")
+        if done.left:
+            self.log(f"cannot empty {folder}: {_names(done.left)} left (in use?)", "error")
         self.refresh_masks()
 
     def open_mask_folder(self):
@@ -830,7 +857,7 @@ class MainWindow(QtWidgets.QMainWindow):
             state = ("CLEANING UP…", STOP_STYLE, "waiting for Wavefront to finish before sweeping")
         elif self.generation is not None:
             state = ("■ STOP", STOP_STYLE, "stop the generation (both Wavefront folders are emptied after it)")
-        elif not self.jobs and any(holo.files_in(folder) for folder in self._wavefront_folders()):
+        elif not self.jobs and any(holo.oriole_files(folder) for folder in self._wavefront_folders()):
             state = ("GENERATE PHASE MASKS", BLOCKED_STYLE, "a Wavefront folder is not empty: Generate asks to sweep it")
         else:
             state = ("GENERATE PHASE MASKS", ACTION_STYLE, "")
@@ -847,6 +874,12 @@ class MainWindow(QtWidgets.QMainWindow):
         script_dir, out_dir = self._wavefront_folders()
         if not Path(out_dir).is_dir() or not Path(script_dir).is_dir():
             self.log(f"Wavefront folders not found ({script_dir}, {out_dir})", "error")
+            return
+        try:                                            # an abort sweeps them: refused now rather than then
+            for folder in (script_dir, out_dir):
+                holo.sweep_rule(folder)
+        except holo.UnsafeSweep as e:
+            self.log(f"not generating: {e}", "error")
             return
         if not self._have_spots() or self._wavefront_missing(log=True):
             return
@@ -873,7 +906,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _sweep_before_generating(self) -> bool:
         """Both Wavefront folders must be empty: a warning says what is left and sweeps it if you say so."""
         script_dir, out_dir = self._wavefront_folders()
-        scripts, files = holo.files_in(script_dir), holo.files_in(out_dir)
+        scripts, files = holo.oriole_files(script_dir), holo.oriole_files(out_dir)
         if not scripts and not files:
             return True
         left = []
@@ -888,12 +921,14 @@ class MainWindow(QtWidgets.QMainWindow):
                         "\n\nSweep them and generate?", {"sweep": "Sweep and generate"}) is None:
             self.log("not generating: the Wavefront folders must be empty", "warn")
             return False
-        swept, still = holo.sweep(script_dir, out_dir)
-        if still:                                       # in use, or written again at once: Wavefront still busy
-            self.log(f"not generating: {_names(still)} still in the Wavefront folders after the sweep (in use, or "
-                     f"Wavefront still saving?)", "error")
+        done = self._sweep(script_dir, out_dir)
+        if done is None:
             return False
-        self.log(f"🧹 Wavefront folders swept ({_n(len(swept), 'file')})")
+        if done.left:                                   # in use, or written again at once: Wavefront still busy
+            self.log(f"not generating: {_names(done.left)} still in the Wavefront folders after the sweep (in use, "
+                     f"or Wavefront still saving?)", "error")
+            return False
+        self.log(f"🧹 Wavefront folders swept ({_n(len(done.swept), 'file')})")
         return True
 
     def _field_fits(self) -> list[str] | None:
@@ -1061,8 +1096,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if wait and left > 0:
             self.btn_generate.setText(f"CLEANING UP IN {math.ceil(left)} s")
             return
-        swept, still = holo.sweep(*self._wavefront_folders())
-        c["swept"] += swept
+        done = self._sweep(*self._wavefront_folders(), report=c["sweeps"] == 0)
+        if done is None:                                # refused (logged): nothing more to do
+            self.timer.stop()
+            self.cleanup = None
+            self.refresh_masks()
+            return
+        still = done.left
+        c["swept"] += done.swept
         c["sweeps"] += 1
         if still and wait and c["sweeps"] < holo.MAX_SWEEPS:
             c["at"] = time.time() + 1                   # not empty yet: again in 1 s

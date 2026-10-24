@@ -1,7 +1,9 @@
 import datetime
 import json
 import os
+import re
 import shutil
+import sys
 from pathlib import Path
 
 import imageio.v2 as imageio
@@ -9,9 +11,9 @@ import numpy as np
 import pytest
 
 from oriole.calibration import HOLO_DEFAULT
-from oriole.holo import (available_masks, drawn_spot, file_dates, files_in, load_script, mask_name, mask_png,
-                         mask_saved, mask_script, off_spot, recorded_spot, script_pending, send_script, sweep,
-                         write_spot_record)
+from oriole.holo import (Swept, UnsafeSweep, available_masks, drawn_spot, file_dates, files_in, load_script,
+                         mask_name, mask_png, mask_saved, mask_script, off_spot, oriole_files, recorded_spot,
+                         script_pending, send_script, sweep, write_spot_record)
 
 DHGUI_SCRIPT = Path(__file__).resolve().parents[1] / "DHgui_20261022" / "scripts" / "test.js"
 DATA = Path(__file__).resolve().parent / "data"
@@ -50,21 +52,66 @@ def test_drawn_spot(tmp_path):
 
 
 def test_script_dropped_then_trigger(tmp_path):
-    assert not script_pending(tmp_path)
-    send_script(tmp_path, "cleanAllBlob();\n")
-    assert (tmp_path / "test.js").read_text() == "cleanAllBlob();\n"
-    assert (tmp_path / "zdone.js").exists() and not (tmp_path / "test.js.part").exists()
-    assert script_pending(tmp_path)
+    script = tmp_path / "script"                # a Wavefront install's script folder
+    script.mkdir()
+    (tmp_path / "wfdIV.exe").touch()
+    assert not script_pending(script)
+    send_script(script, "cleanAllBlob();\n")
+    assert (script / "test.js").read_text() == "cleanAllBlob();\n"
+    assert (script / "zdone.js").exists() and not (script / "test.js.part").exists()
+    assert script_pending(script)
     with pytest.raises(RuntimeError, match="auto-load"):
-        send_script(tmp_path, "x")
-    (tmp_path / "test.js").unlink()             # what Wavefront does once it ran the script
-    assert not script_pending(tmp_path)
-    (tmp_path / "test.js").write_text("left behind")
-    (tmp_path / "sub").mkdir()
-    assert sweep(tmp_path) == (["test.js", "zdone.js"], []) and (tmp_path / "sub").is_dir()
-    assert sweep(tmp_path / "missing") == ([], [])
+        send_script(script, "x")
+    (script / "test.js").unlink()               # what Wavefront does once it ran the script
+    assert not script_pending(script)
+    (script / "test.js").write_text("left behind")
+    (script / "sub").mkdir()
+    assert sweep(script) == Swept(["test.js", "zdone.js"], [], []) and (script / "sub").is_dir()
     with pytest.raises(FileNotFoundError):
         send_script(tmp_path / "missing", "x")
+
+
+def test_sweep_guards(tmp_path, monkeypatch):
+    install = tmp_path / "wfdIV_x"
+    script, masks = install / "script", install / "GeneratedPhasemasks"
+    for d in (script, masks / "sub"):
+        d.mkdir(parents=True)
+    (install / "wfdIV.exe").touch()
+    for name in ("Pattern1_000.algoPhp.png", "Pattern1_000.xml", "Pattern_spots.json", "notes.txt", "Pattern1.png"):
+        (masks / name).touch()
+    for name in ("test.js", "zdone.js", "test.js.part", "readme.txt"):
+        (script / name).touch()
+    assert [p.name for p in oriole_files(masks)] == ["Pattern1_000.algoPhp.png", "Pattern1_000.xml",
+                                                     "Pattern_spots.json"]
+    done = sweep(script, masks)                 # only Wavefront's and Oriole's files, never a sub-folder
+    assert done.swept == ["test.js", "test.js.part", "zdone.js", "Pattern1_000.algoPhp.png", "Pattern1_000.xml",
+                          "Pattern_spots.json"]
+    assert done.left == [] and [p.name for p in done.foreign] == ["readme.txt", "notes.txt", "Pattern1.png"]
+    assert (masks / "sub").is_dir() and (masks / "notes.txt").exists() and (script / "readme.txt").exists()
+
+    # one folder refused: nothing deleted anywhere, the good folder neither
+    (masks / "Pattern2_000.algoPhp.png").touch()
+    lonely = tmp_path / "elsewhere" / "script"  # no wfdIV.exe next to it
+    lonely.mkdir(parents=True)
+    for bad, why in ((tmp_path / "nope", "is not an existing folder"),
+                     (install, "is not a script or GeneratedPhasemasks folder"),
+                     (lonely, "is not in a Wavefront install (no wfdIV.exe next to it)")):
+        with pytest.raises(UnsafeSweep, match=re.escape(why)):
+            sweep(masks, bad)
+        assert (masks / "Pattern2_000.algoPhp.png").exists() and oriole_files(bad) == []
+    monkeypatch.setattr(os.path, "ismount", lambda path: True)
+    with pytest.raises(UnsafeSweep, match="is a drive root"):
+        sweep(masks)
+    monkeypatch.undo()
+    if sys.platform == "win32":                 # a junction named like a mask folder, in an install: refused
+        import _winapi
+        other = tmp_path / "wfdIV_y"
+        other.mkdir()
+        (other / "wfdIV.exe").touch()
+        _winapi.CreateJunction(str(masks), str(other / "GeneratedPhasemasks"))
+        with pytest.raises(UnsafeSweep, match="is a link to another folder"):
+            sweep(other / "GeneratedPhasemasks")
+        assert (masks / "Pattern2_000.algoPhp.png").exists()
 
 
 def test_masks_dates_and_record(tmp_path):

@@ -58,6 +58,7 @@ def window(qapp, tmp_path, monkeypatch):
     cfg = Config(wfd_root=str(tmp_path / "wfd"), start_wavefront=False)
     for d in (cfg.wfd_script_dir, cfg.wfd_output_dir):
         os.makedirs(d)
+    (tmp_path / "wfd" / "wfdIV.exe").write_bytes(b"")   # a Wavefront install: its folders may be swept
     w = MainWindow(cfg, config_path=tmp_path / "cfg.json")
     w.daq_log, w.asked, w.answers = daq_log, asked, answers
     w.show()
@@ -643,11 +644,10 @@ def test_wavefront_started_checked_and_watched(window, tmp_path, monkeypatch):
     w._watch_wavefront()
     assert w.lbl_wavefront.text() == "Wavefront: not running" and w.btn_wavefront.text() == "Start"
 
-    # Start: not an install; then an install: its settings made for script mode, then started
+    # Start: its program missing (licence); then there: its settings made for script mode, then started
     w.btn_wavefront.click()
-    assert f"cannot start Wavefront IV: no wfdIV.exe in {root}" in log() and not started
-    for name in ("wfdIV.exe", "wfdIVCore.dll"):
-        (root / name).write_bytes(b"x")
+    assert f"cannot start Wavefront IV: wfdIVCore.dll is missing or empty in {root}" in log() and not started
+    (root / "wfdIVCore.dll").write_bytes(b"x")
     w.btn_wavefront.click()
     assert started == [root] and "set in wfdIV.ini: scriptEngine/autoload, mainSettings/rootPath" in log()
     assert wavefront.read_ini("scriptEngine", "autoload", ini) == "true"
@@ -771,3 +771,45 @@ def test_internal_errors_and_unreadable_settings_are_logged(qapp, tmp_path, monk
     assert "internal error (ValueError: boom), details in" in w.log_view.toPlainText()
     assert 'raise ValueError("boom")' in (tmp_path / "oriole.log").read_text()
     w.close()
+
+
+def test_brooms_delete_only_wavefront_and_oriole_files(window):
+    w = window
+    log = w.log_view.toPlainText
+    out_dir, script_dir = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir)
+    notes, readme, sub = out_dir / "notes.txt", script_dir / "readme.txt", out_dir / "kept"
+    for f in (notes, readme):
+        f.write_text("mine")
+    sub.mkdir()
+    w.refresh_masks()
+    assert "#00FF00" in w.btn_generate.styleSheet()         # not Wavefront's: Generate stays green
+    (out_dir / "Pattern3_000.algoPhp.png").write_bytes(b"png")
+    w.answers["Sweep the phase mask folder"] = "delete"
+    w.btn_sweep_masks.click()
+    assert not (out_dir / "Pattern3_000.algoPhp.png").exists() and notes.exists() and sub.is_dir()
+    assert "left alone (not Oriole's or Wavefront's): notes.txt" in log()
+    w.btn_sweep_scripts.click()
+    assert readme.exists() and "script folder already clean" in log()
+
+    # a generation stopped: its cleanup leaves them too
+    w.set_image(np.zeros((512, 672), np.float32))
+    w._on_click(100.0, 100.0, False)
+    w.generate()                                            # nothing of Wavefront's left: no question asked
+    w.btn_generate.click()                                  # STOP
+    w.cleanup["at"] -= holo.ABORT_WAIT_S
+    w.poll()
+    assert "cleaned up after the abort: both Wavefront folders emptied (2 files: test.js, zdone.js)" in log()
+    assert notes.exists() and readme.exists() and sub.is_dir()
+
+    # no longer a Wavefront install (no wfdIV.exe): every broom refuses, nothing is deleted, nothing generated
+    (Path(w.config.wfd_root) / "wfdIV.exe").unlink()
+    mask = out_dir / "Pattern4_000.algoPhp.png"
+    mask.write_bytes(b"png")
+    w.btn_sweep_masks.click()
+    assert (f"refused to sweep: {out_dir} is not in a Wavefront install (no wfdIV.exe next to it); nothing deleted"
+            in log()) and mask.exists()
+    (script_dir / "test.js").write_text("stale")
+    w.btn_sweep_scripts.click()
+    assert f"refused to sweep: {script_dir} is not in a Wavefront install" in log() and (script_dir / "test.js").exists()
+    w.generate()
+    assert f"not generating: {script_dir} is not in a Wavefront install" in log().splitlines()[-1] and not w.jobs

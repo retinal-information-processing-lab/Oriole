@@ -112,9 +112,9 @@ folder)* selected): one mask per spot, saved by Wavefront as `Pattern1_000.algoP
   counts the attempts (1/3, 2/3). At 3/3 the generation is aborted (with a missing mask: restart
   Wavefront).
 * After STOP or an abort Oriole sends nothing more and waits 2 s (Wavefront may still be
-  computing; the button counts down), then empties both Wavefront folders, every file whatever
-  its name (they were empty when the generation started), and again every second while a file is
-  left (still being saved or open), 10 sweeps at most: Generate is ready again.
+  computing; the button counts down), then empties both Wavefront folders of Wavefront's and
+  Oriole's files (they were empty of them when the generation started), and again every second
+  while one is left (still being saved or open), 10 sweeps at most: Generate is ready again.
 * `Pattern_spots.json` next to the masks says which spot each mask is.
 
 **Wavefront folder** (holo *Settings*, `E:\wfdIV_20261022` by default): the Wavefront IV install
@@ -130,6 +130,20 @@ the new folder in Oriole and press Start.
 The 🧹 next to the script folder sweeps it clean at once, the one next to the phase mask folder
 after a confirmation (it lists how many files and their dates). 📂 opens the phase mask folder in
 the file explorer.
+
+**What a sweep may delete** (the 🧹, the sweep before generating, the cleanup after an abort), in
+`oriole/holo.py` (`sweep_rule`, `SWEEPABLE`). Every folder is checked first, and if one fails,
+nothing at all is deleted (a red line in the log says why). The folder must:
+1. exist;
+2. be named `script` or `GeneratedPhasemasks`;
+3. not be a drive root;
+4. not be a link or junction to another folder;
+5. sit next to a `wfdIV.exe` (in a Wavefront install).
+
+Then only files right inside are deleted, never a sub-folder, and only those Wavefront or Oriole
+writes: `Pattern<n>_000.*` and `Pattern_spots.json` in `GeneratedPhasemasks`, `*.js` (and
+`*.js.part`) in `script`. Any other file is left alone and listed in the log; it doesn't turn
+Generate yellow either.
 
 **Starting Wavefront.** When Oriole opens and Wavefront is not running (*start Wavefront with
 Oriole*, holo *Settings*), or with **Start**, Oriole starts it from the Wavefront folder in script

@@ -10,6 +10,7 @@ import datetime as _dt
 import json
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -108,16 +109,74 @@ def available_masks(output_dir) -> list[int]:
     return sorted(int(m.group(1)) for p in files_in(output_dir) if (m := rx.match(p.name)))
 
 
-def sweep(*folders) -> tuple[list[str], list[Path]]:
-    """Delete the files (not the sub-folders) of ``folders``: the names deleted, and the files left (in use...)."""
-    swept = []
-    for p in [p for folder in folders for p in files_in(folder)]:
-        try:
-            p.unlink()
-            swept.append(p.name)
-        except OSError:
-            pass
-    return swept, [p for folder in folders for p in files_in(folder)]
+# ----------------------------------------------------------------------------- sweeping, guarded
+class UnsafeSweep(RuntimeError):
+    """A folder Oriole refuses to sweep: nothing is deleted."""
+
+
+# The only folders a sweep may touch, by name, and the only files it may delete there: what Wavefront and Oriole write
+SWEEPABLE = {"generatedphasemasks": re.compile(rf"^({PREFIX}\d+_000\.[\w.]+|{re.escape(RECORD_NAME)})$"),
+             "script": re.compile(r"^[^.][^\\/]*\.js(\.part)?$")}
+INSTALL_MARK = "wfdIV.exe"          # both lie in a Wavefront install, next to its launcher
+
+
+def sweep_rule(folder) -> re.Pattern:
+    """The files a sweep may delete in ``folder``. UnsafeSweep unless ``folder`` is an existing script or
+    GeneratedPhasemasks folder of a Wavefront install, and not a drive root nor a link."""
+    p = Path(folder)
+    rule = SWEEPABLE.get(p.name.lower())
+    if not p.is_dir():
+        raise UnsafeSweep(f"{p} is not an existing folder")
+    if rule is None:
+        raise UnsafeSweep(f"{p} is not a script or GeneratedPhasemasks folder")
+    if os.path.ismount(p) or p.parent == p:
+        raise UnsafeSweep(f"{p} is a drive root")
+    if p.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(p):
+        raise UnsafeSweep(f"{p} is a link to another folder")
+    if not (p.parent / INSTALL_MARK).is_file():
+        raise UnsafeSweep(f"{p} is not in a Wavefront install (no {INSTALL_MARK} next to it)")
+    return rule
+
+
+def _plain_files(folder) -> list[Path]:
+    """The files right inside ``folder``, links and sub-folders left out, in natural order."""
+    with os.scandir(folder) as entries:
+        return sorted((Path(e.path) for e in entries if e.is_file(follow_symlinks=False)), key=natural_key)
+
+
+def oriole_files(folder) -> list[Path]:
+    """The files of ``folder`` a sweep would delete (Wavefront's and Oriole's); none in a folder it may not sweep."""
+    try:
+        rule = sweep_rule(folder)
+    except UnsafeSweep:
+        return []
+    return [p for p in _plain_files(folder) if rule.match(p.name)]
+
+
+@dataclass
+class Swept:
+    swept: list[str]                # names deleted
+    left: list[Path]                # Wavefront's or Oriole's files still there (in use, or written again at once)
+    foreign: list[Path]             # anything else: never deleted
+
+
+def sweep(*folders) -> Swept:
+    """Delete Wavefront's and Oriole's files in ``folders`` (SWEEPABLE), and nothing else: only files right inside,
+    never a sub-folder. Every folder is checked first (sweep_rule): one refused and nothing at all is deleted."""
+    rules = [(folder, sweep_rule(folder)) for folder in folders]
+    done = Swept([], [], [])
+    for folder, rule in rules:
+        for p in _plain_files(folder):
+            if not rule.match(p.name):
+                done.foreign.append(p)
+                continue
+            try:
+                p.unlink()
+                done.swept.append(p.name)
+            except OSError:
+                pass
+    done.left = [p for folder, rule in rules for p in _plain_files(folder) if rule.match(p.name)]
+    return done
 
 
 def file_dates(paths) -> str:
