@@ -60,3 +60,14 @@ def test_config_wavefront_folders_from_one_root():
     assert Path(cfg.wfd_output_dir) == Path(r"E:\wfdIV_20261022\GeneratedPhasemasks")
     old = Config.from_dict({"wfd_script_dir": r"D:\wfd\script", "wfd_output_dir": r"D:\wfd\GeneratedPhasemasks"})
     assert Path(old.wfd_root) == Path(r"D:\wfd") and "wfd_script_dir" not in old.to_dict()
+
+
+def test_unreadable_config_gives_the_defaults(tmp_path):
+    from oriole.config import Config
+    p = tmp_path / "cfg.json"
+    p.write_text("{not json")
+    cfg = Config.load(p)
+    assert cfg == Config() and "unreadable" in cfg.load_error and "cfg.json.bad" in cfg.load_error
+    assert (tmp_path / "cfg.json.bad").read_text() == "{not json" and not p.exists()
+    cfg.save()
+    assert "load_error" not in json.loads(p.read_text()) and Config.load(p).load_error == ""

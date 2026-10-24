@@ -22,11 +22,13 @@ class Config:
     holo_cal: dict = field(default_factory=HOLO_DEFAULT.to_dict)       # camera -> Wavefront µm
     last_dir: str = ""             # last directory used in file dialogs
     linked_bin: str = ""           # last bin the spot bin was merged into
-    wfd_root: str = r"E:\wfdIV_20261022"    # Wavefront IV folder, holding script\ and GeneratedPhasemasks\
+    wfd_root: str = r"E:\wfdIV_20261022"    # Wavefront IV install: wfdIV.exe, script\ and GeneratedPhasemasks\
+    start_wavefront: bool = True   # Oriole starts Wavefront (in script mode) when it is not running
     nidaq_device: str = "Dev1"     # NI-DAQ device driving the shutter (as in Plerion)
     shutter_ao: int = 0            # its analog output channel
     show_slm_field: bool = True    # Wavefront's field (square, no-go zone, power circles) drawn on the image
-    path: str = field(default="", compare=False)   # where this config is saved (not serialised)
+    path: str = field(default="", compare=False)        # where this config is saved (not serialised)
+    load_error: str = field(default="", compare=False)  # why the saved config could not be read (not serialised)
 
     @property
     def dmd_shape(self) -> tuple[int, int]:
@@ -52,7 +54,8 @@ class Config:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d.pop("path", None)
+        for key in ("path", "load_error"):
+            d.pop(key)
         return d
 
     @classmethod
@@ -60,7 +63,7 @@ class Config:
         d = dict(d)
         if "wfd_root" not in d and d.get("wfd_script_dir"):     # older configs kept both folders
             d["wfd_root"] = str(Path(d["wfd_script_dir"]).parent)
-        known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__ and k != "path"}
+        known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__ and k not in ("path", "load_error")}
         return cls(**known)
 
     def save(self, path: os.PathLike | str | None = None) -> Path:
@@ -74,14 +77,24 @@ class Config:
 
     @classmethod
     def load(cls, path: os.PathLike | str | None = None) -> "Config":
-        """Load ``path`` (default location if None). The default falls back to the pre-rename ~/.aule file."""
+        """Load ``path`` (default location if None). The default falls back to the pre-rename ~/.aule file. An
+        unreadable file gives the defaults (``load_error`` says why), the file kept aside as <name>.bad."""
         path = Path(path or DEFAULT_CONFIG_PATH)
         src = path
         if not src.exists() and path == DEFAULT_CONFIG_PATH and LEGACY_CONFIG_PATH.exists():
             src = LEGACY_CONFIG_PATH
         if not src.exists():
             return cls(path=str(path))
-        with open(src) as f:
-            cfg = cls.from_dict(json.load(f))
+        try:
+            with open(src) as f:
+                cfg = cls.from_dict(json.load(f))
+        except (OSError, ValueError, TypeError, AttributeError) as e:
+            bad = src.with_name(src.name + ".bad")
+            try:
+                os.replace(src, bad)
+            except OSError:
+                pass
+            cfg = cls(load_error=f"settings file {src} unreadable ({e}): default settings (the file is kept as "
+                                 f"{bad.name})")
         cfg.path = str(path)
         return cfg

@@ -8,4 +8,5 @@ Pillow
 PyQt6>=6.7
 pyqtgraph>=0.14
 nidaqmx            # holo shutter; optional at runtime, needs the NI-DAQmx driver on the rig
+pyjavaz            # Snap / Live from Micro-Manager (its pycro-manager server); optional at runtime
 pytest

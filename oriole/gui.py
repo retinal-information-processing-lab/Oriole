@@ -1,23 +1,26 @@
 """Oriole window: visual (DMD) on the left, the image to click spots on in the middle, holo (SLM) on the right.
 
 Look and dark theme taken from Plerion; the holo side follows the MATLAB DHgui. Wavefront IV gets one script at a
-time (the phase masks of a generation, or a Load), polled every 100 ms: a script it does not take, or a mask it
-does not save, is erased and sent again, MAX_ATTEMPTS sends in all.
+time (the phase masks of a generation, a Load, or a check of its script mode), polled every 100 ms: a script it does
+not take, or a mask it does not save, is erased and sent again, MAX_ATTEMPTS sends in all. Images come from a file or
+from Micro-Manager (camera.Feed).
 """
 from __future__ import annotations
 
 import datetime as _dt
 import html
 import math
+import os
 import sys
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from . import holo, visual
+from . import camera, holo, visual, wavefront
 from .calibration import EPI_SIZE
 from .config import DEFAULT_CONFIG_PATH, Config
 from .images import load_gray
@@ -28,13 +31,17 @@ from .theme import (ACCENT, ACTION_STYLE, BLOCKED_STYLE, BTN, DIM, HOLO_COLOUR, 
 from .widgets import (CalibrationBox, FolderEdit, ImageView, action_button, button, card, icon_button, spin_box,
                       title_label)
 
+LOG_PATH = DEFAULT_CONFIG_PATH.parent / "oriole.log"   # tracebacks of internal errors
 AUTOLOAD_HINT = 'check that "Tools → Script engine → auto load (script folder)" is selected in Wavefront'
 NOT_TAKEN_FIX = f"{AUTOLOAD_HINT}, or restart Wavefront IV"
 NOT_SAVED_FIX = "restart Wavefront IV and generate again"
+START_TIMEOUT_S = 20.0          # Wavefront started by Oriole, its program still not running after this long
 HELP_HTML = f"""
 <h3>Spots</h3>
 <p><b>Load image…</b> an epi image binned 2×2, {EPI_SIZE[0]} × {EPI_SIZE[1]} px (any other size: big red
-warning).<br>
+warning), or take it from Micro-Manager: <b>Snap</b> (one image at {camera.EXPOSURE_MS:.0f} ms, binning 2×2) or
+<b>Live</b> (one after the other; the frames of Micro-Manager's own live mode while it runs). Micro-Manager must be
+running with Tools → Options → <i>Run pycro-manager server on port {camera.PORT}</i> ticked.<br>
 <b>Left click</b> adds a spot, <b>drag</b> a spot to move it, <b>right click</b> on a spot removes it.
 <b>Undo</b> / <b>Clear</b>. <b>Spot Ø</b> is the diameter of every spot on the sample (µm).</p>
 <h3>Calibrations (typed by hand, one per side)</h3>
@@ -47,9 +54,13 @@ spot and 2(i−1)+1 its negative; a <code>.json</code> lists the frames.<br>
 <b>Merge into bin…</b> appends it to a linked bin (inputs untouched; <code>.indices.json</code> gives the
 new frame numbers).</p>
 <h3>Holo · SLM</h3>
-<p><b>Wavefront folder</b>: scripts go to its <code>script\\</code>, masks are read from its
-<code>GeneratedPhasemasks\\</code>; 🧹 sweeps a folder clean, 📂 opens the phase mask folder in the file
-explorer.<br>
+<p><b>Wavefront folder</b>: the Wavefront IV install (<code>wfdIV.exe</code>); scripts go to its
+<code>script\\</code>, masks are read from its <code>GeneratedPhasemasks\\</code>; 🧹 sweeps a folder clean, 📂 opens
+the phase mask folder in the file explorer. After a new install (its licence expired), pick its folder.<br>
+Under it, Wavefront's state. <b>Start</b> starts it from that folder in script mode (set in its settings,
+<code>%APPDATA%\\wfdIV\\wfdIV.ini</code>, with the folder it saves masks in); Oriole does so itself when it opens
+(<b>start Wavefront with Oriole</b>). <b>Check</b> sends it a script that does nothing: taken, Wavefront is in script
+mode. Oriole never closes Wavefront.<br>
 On the image, through the holo calibration, Wavefront's field as Wavefront draws it: its square in
 <span style="color:{NO_GO}">red</span>, the image outside it hatched red (no-go zone: Wavefront cannot put a spot
 there), its 20 % diffraction efficiency circle in <span style="color:{OUTER_CIRCLE}">orange</span> dashes, its 90 %
@@ -85,9 +96,15 @@ def _names(paths) -> str:
     return ", ".join(p.name for p in paths)
 
 
+def _same_folder(a, b) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
 @dataclass
 class Job:
-    """A script for Wavefront: a phase mask to compute (``png`` its file, for spot ``spot``), or a Load (no png)."""
+    """A script for Wavefront: a phase mask to compute ("mask": ``png`` its file, for spot ``spot``), a saved one to
+    show ("load"), or one doing nothing, to see that Wavefront takes scripts ("check")."""
+    kind: str
     name: str                               # Pattern<n>
     js: str
     png: Path | None = None
@@ -98,7 +115,8 @@ class Job:
 
     @property
     def what(self) -> str:
-        return f"{self.name} script" if self.png else f"script loading {self.name}"
+        return {"mask": f"{self.name} script", "load": f"script loading {self.name}", "check": "check script"}[
+            self.kind]
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -107,6 +125,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config = config
         self.config_path = config_path
         self.image: np.ndarray | None = None
+        self.image_source = ""
         self.spots: list[tuple[float, float]] = []      # camera px
         self.undo_stack: list[list[tuple[float, float]]] = []
         self.dragging: int | None = None                # spot being dragged
@@ -114,18 +133,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self.last_spot_bin: Path | None = None
         self.slm_spot: dict | None = None               # where the mask loaded on the SLM was clicked
         self.shutter = Shutter(config.nidaq_device, config.shutter_ao)
-        self.jobs: list[Job] = []                       # for Wavefront, the first one sent: masks, or a Load
+        self.jobs: list[Job] = []                       # for Wavefront, the first one sent: masks, a Load or a check
         self.generation: dict | None = None             # the spots of the masks being generated
         self.cleanup: dict | None = None                # after an abort: both folders swept once Wavefront is done
+        self.wf_folder: Path | None = None              # install the running Wavefront started from
+        self.wf_ready = False                           # its window is open: it takes scripts (in script mode)
+        self.wf_mode: bool | None = None                # in script mode, as last seen (None: not known)
+        self.wf_started: float | None = None            # when Oriole started it, until it is ready
+        self.feed = camera.Feed(parent=self)
+        self.feed.frame.connect(self._on_frame)
+        self.feed.failed.connect(self._on_camera_failed)
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(100)
         self.timer.timeout.connect(self.poll)
+        self.wf_timer = QtCore.QTimer(self)             # Wavefront's state, every second
+        self.wf_timer.setInterval(1000)
+        self.wf_timer.timeout.connect(self._watch_wavefront)
+        self.wf_check = QtCore.QTimer(self)             # its script mode, checked 2 s after it is ready
+        self.wf_check.setSingleShot(True)
+        self.wf_check.setInterval(2000)
+        self.wf_check.timeout.connect(self._check_when_idle)
         self.setWindowTitle("Oriole")
         self.resize(1500, 900)
         self._build()
         self.redraw_spots()
         self.refresh_masks()
         self.log("Oriole ready: load an image, click spots (drag to move, right-click removes; ? for help).")
+        if config.load_error:
+            self.log(config.load_error, "error")
+        if wavefront.SUPPORTED:
+            self._watch_wavefront()
+            self.wf_timer.start()
+            if config.start_wavefront and self.wf_folder is None:
+                QtCore.QTimer.singleShot(0, self.start_wavefront)
 
     # ------------------------------------------------------------------ layout
     def _build(self):
@@ -175,6 +215,14 @@ class MainWindow(QtWidgets.QMainWindow):
         col = QtWidgets.QVBoxLayout()
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(button("Load image…", self.load_image_dialog))
+        mm = f"Micro-Manager ({camera.EXPOSURE_MS:.0f} ms, binning 2x2; its server on port {camera.PORT})"
+        self.btn_snap = button("Snap", self.snap, f"One image from {mm}")
+        self.btn_live = button("Live", lambda: None, f"Images from {mm}, one after the other",
+                               "QPushButton:checked { background: #8B1A1A; color: white; }")
+        self.btn_live.setCheckable(True)
+        self.btn_live.toggled.connect(self._on_live)
+        bar.addWidget(self.btn_snap)
+        bar.addWidget(self.btn_live)
         bar.addWidget(QtWidgets.QLabel("  Spot Ø"))
         self.spin_diam = spin_box(self.config.spot_diameter_um, 0.5, 2000, " µm", 1, slot=self._on_diameter)
         bar.addWidget(self.spin_diam)
@@ -207,9 +255,17 @@ class MainWindow(QtWidgets.QMainWindow):
         box = QtWidgets.QVBoxLayout(setup)
         box.addWidget(QtWidgets.QLabel("Wavefront folder"))
         self.edit_wfd_root = FolderEdit(self.config.wfd_root)
-        self.edit_wfd_root.setToolTip("holds script\\ and GeneratedPhasemasks\\")
+        self.edit_wfd_root.setToolTip("the Wavefront IV install: wfdIV.exe, script\\ and GeneratedPhasemasks\\")
         self.edit_wfd_root.changed.connect(self._on_wavefront_root)
         box.addWidget(self.edit_wfd_root)
+        row = QtWidgets.QHBoxLayout()
+        self.lbl_wavefront = QtWidgets.QLabel()
+        self.lbl_wavefront.setWordWrap(True)
+        self.btn_wavefront = button("Start", self.start_or_check_wavefront)
+        self.btn_wavefront.setFixedWidth(60)
+        row.addWidget(self.lbl_wavefront, stretch=1)
+        row.addWidget(self.btn_wavefront)
+        box.addLayout(row)
         self.btn_sweep_scripts = icon_button("🧹", self.sweep_script_folder, "Sweep the script folder clean")
         self.lbl_script_dir = self._folder_row(box, "script folder", self.btn_sweep_scripts)
         self.btn_open_masks = icon_button("📂", self.open_mask_folder, "Open it in the file explorer")
@@ -226,6 +282,11 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.edit_device, stretch=1)
         row.addWidget(self.spin_ao)
         box.addLayout(row)
+        self.chk_start_wavefront = QtWidgets.QCheckBox("start Wavefront with Oriole")
+        self.chk_start_wavefront.setToolTip("when Oriole opens and Wavefront is not running, start it in script mode")
+        self.chk_start_wavefront.setChecked(self.config.start_wavefront)
+        self.chk_start_wavefront.toggled.connect(self._on_start_wavefront)
+        box.addWidget(self.chk_start_wavefront)
         self.chk_slm_field = QtWidgets.QCheckBox("SLM field on the image")
         self.chk_slm_field.setToolTip("Wavefront's square, the no-go zone outside it, its 20 % and 90 % power circles "
                                       "and its centre")
@@ -266,6 +327,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                           lambda: self.stop_generation() if self.generation else self.generate())
         col.addWidget(self.btn_generate)
         self._show_shutter()
+        self._show_wavefront()
         return col
 
     @staticmethod
@@ -307,6 +369,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_view.appendHtml(f'<span style="color:{LOG_COLOURS[level]}{big}">'
                                  f'{_dt.datetime.now():%H:%M:%S}  {html.escape(text)}</span>')
 
+    def internal_error(self, kind, value, tb):
+        """An exception no slot caught (sys.excepthook): logged, its traceback in LOG_PATH, Oriole goes on (PyQt
+        would abort it)."""
+        try:
+            LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(f"{_dt.datetime.now():%Y-%m-%d %H:%M:%S}\n{''.join(traceback.format_exception(kind, value, tb))}")
+        except OSError:
+            pass
+        self.log(f"internal error ({kind.__name__}: {value}), details in {LOG_PATH}; Oriole goes on", "error")
+
     def _choose(self, title: str, text: str, choices: dict[str, str]) -> str | None:
         """A warning with a button per choice ({key: label}) and Cancel, the default: the key clicked, or None."""
         box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Warning, title, text, parent=self)
@@ -334,12 +407,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config.last_dir = str(Path(path).parent)
         self.set_image(image, path)
 
-    def set_image(self, image: np.ndarray, source: str = ""):
-        """Show a camera image (from a file now; Micro-Manager snap / live later)."""
-        self.image = np.asarray(image, dtype=np.float32)
-        self.view.set_image(self.image)
-        self.redraw_field()
-        h, w = self.image.shape
+    def set_image(self, image: np.ndarray, source: str = "", announce: bool = True):
+        """Show a camera image (a file, or from Micro-Manager). ``announce``: log it and check its size (live frames
+        do so only when their size changes)."""
+        image = np.asarray(image, dtype=np.float32)
+        resized = self.image is None or image.shape != self.image.shape
+        self.image, self.image_source = image, source
+        self.view.set_image(image, fit=resized)
+        if resized:
+            self.redraw_field()
+        if not (announce or resized):
+            return
+        h, w = image.shape
         self.log(f"image {Path(source).name or 'set'}: {w} x {h} px")
         if (w, h) == EPI_SIZE:
             self.lbl_image_warning.hide()
@@ -354,6 +433,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log(f"WRONG IMAGE SIZE: {w} x {h} px instead of {ew} x {eh}. {why}. Bin it 2x2 and load it "
                  f"again: both calibrations are made for {ew} x {eh} epi images, so spot positions, sizes "
                  f"and everything extracted or generated from this image would be wrong.", "error")
+
+    def snap(self):
+        if self.feed.busy:
+            return
+        self.btn_snap.setEnabled(False)
+        self.feed.snap()
+
+    def _on_live(self, on: bool):
+        self.feed.set_live(on)
+        self.btn_snap.setEnabled(not on and not self.feed.busy)
+        self.log("Micro-Manager live: on" if on else "Micro-Manager live: off")
+
+    def _on_frame(self, image, mm_live: bool):
+        source = "Micro-Manager live" if self.feed.live or mm_live else "Micro-Manager snap"
+        self.set_image(image, source, announce=source != self.image_source or not self.feed.live)
+        self.btn_snap.setEnabled(not self.btn_live.isChecked())
+
+    def _on_camera_failed(self, message: str):
+        self.log(message, "error")
+        self.btn_live.setChecked(False)
+        self.btn_snap.setEnabled(True)
 
     def _on_click(self, x: float, y: float, right: bool):
         if self.image is None:
@@ -501,6 +601,111 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log(f"wrote {out}: {m['n_linked_frames']} linked + "
                  f"{m['n_total_frames'] - m['n_linked_frames']} spot frames{first} (indices in .indices.json)")
 
+    # ------------------------------------------------------------------ holo: Wavefront itself
+    def start_or_check_wavefront(self):
+        if self.wf_folder is None:
+            self.start_wavefront()
+        else:
+            self.check_wavefront()
+
+    def start_wavefront(self):
+        """Start Wavefront from the Wavefront folder, in script mode, saving masks where Oriole reads them."""
+        procs = wavefront.running()
+        if "core" in procs:
+            self.log(f"Wavefront IV is already running (from {procs['core'][1]})")
+            return
+        folder = Path(self.config.wfd_root)
+        problem = wavefront.install_problem(folder)
+        if problem:
+            others = wavefront.other_installs(folder)
+            hint = f"; other installs: {', '.join(map(str, others))} (pick one as the Wavefront folder)" if others else ""
+            self.log(f"cannot start Wavefront IV: {problem}{hint}", "error")
+            return
+        try:
+            changed = wavefront.prepare(folder)
+            wavefront.start(folder)
+        except OSError as e:
+            self.log(f"cannot start Wavefront IV from {folder}: {e}", "error")
+            return
+        self.wf_started = time.time()
+        done = f"; set in {wavefront.INI_PATH.name}: {', '.join(changed)}" if changed else ""
+        self.log(f"starting Wavefront IV from {folder}, in script mode{done}")
+        self._show_wavefront()
+
+    def check_wavefront(self):
+        """Send Wavefront a script that does nothing: taken, it is in script mode."""
+        if self.jobs or self.computing:
+            self.log("not now: Wavefront has scripts to run", "warn")
+            return
+        if self._wavefront_missing(log=True) or not self._purge_scripts():
+            return
+        self.jobs = [Job("check", "check", holo.CHECK_SCRIPT)]
+        self._send()
+
+    def _watch_wavefront(self):
+        """Every second: is Wavefront running, from which install, ready; its script mode is checked once it is
+        ready, and said when it does not start."""
+        core = wavefront.running().get("core")
+        folder = (core[1] or Path(self.config.wfd_root)) if core else None     # its folder unknown: taken as ours
+        ready = core is not None and wavefront.window_open(core[0])
+        if ready and not self.wf_ready:                 # just ready (or seen for the first time)
+            if not _same_folder(folder, self.config.wfd_root):
+                self.log(f"Wavefront IV runs from {folder}, not from the Wavefront folder {self.config.wfd_root}: it "
+                         f"reads its scripts elsewhere. Close it and press Start, or pick {folder} as the Wavefront "
+                         f"folder", "error")
+            elif self.wf_mode is None:
+                self.wf_check.start()
+        if core is None:
+            self.wf_mode = None
+        if ready:
+            self.wf_started = None
+        elif self.wf_started is not None and core is None and time.time() - self.wf_started > START_TIMEOUT_S:
+            self.wf_started = None
+            self.log(f"Wavefront IV did not start (see its own message): {wavefront.LICENCE_HELP}", "error")
+        self.wf_folder, self.wf_ready = folder, ready
+        self._show_wavefront()
+
+    def _check_when_idle(self):
+        if self.wf_ready and self.wf_mode is None and not self.jobs and not self.computing:
+            self.check_wavefront()
+
+    def _wavefront_missing(self, log: bool = False) -> str | None:
+        """Why Wavefront cannot take Oriole's scripts now (not running, or from another install), if so."""
+        if not wavefront.SUPPORTED:
+            return None
+        core = wavefront.running().get("core")
+        if core is None:
+            why = "Wavefront IV is not running: press Start (holo Settings)"
+        elif core[1] is not None and not _same_folder(core[1], self.config.wfd_root):
+            why = f"Wavefront IV runs from {core[1]}, not from the Wavefront folder {self.config.wfd_root}"
+        else:
+            return None
+        if log:
+            self.log(why, "error")
+        return why
+
+    def _show_wavefront(self):
+        if not wavefront.SUPPORTED:
+            text, colour = "Wavefront: started by hand (not Windows)", DIM
+        elif self.wf_folder is None:
+            text, colour = ("Wavefront: starting…", WARN) if self.wf_started else ("Wavefront: not running", DIM)
+        elif not _same_folder(self.wf_folder, self.config.wfd_root):
+            text, colour = f"Wavefront: another install ({self.wf_folder.name})", LOG_COLOURS["error"]
+        elif not self.wf_ready:
+            text, colour = "Wavefront: starting…", WARN
+        elif self.wf_mode:
+            text, colour = "Wavefront: script mode ✓", LOG_COLOURS["info"]
+        elif self.wf_mode is False:
+            text, colour = "Wavefront: NOT in script mode", LOG_COLOURS["error"]
+        else:
+            text, colour = "Wavefront: running", WARN
+        self.lbl_wavefront.setText(text)
+        self.lbl_wavefront.setStyleSheet(f"color: {colour}; font-weight: bold;")
+        self.btn_wavefront.setText("Start" if self.wf_folder is None else "Check")
+        self.btn_wavefront.setEnabled(wavefront.SUPPORTED and not (self.wf_started and self.wf_folder is None))
+        self.btn_wavefront.setToolTip("start Wavefront IV from the Wavefront folder, in script mode"
+                                      if self.wf_folder is None else "check that Wavefront takes scripts")
+
     # ------------------------------------------------------------------ holo: folders
     @property
     def computing(self) -> bool:
@@ -524,6 +729,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.computing:
             self.log("not now: Wavefront is computing masks from that folder", "warn")
             return
+        self.jobs = []                                  # a Load or a check still waiting goes with its script
         swept, left = holo.sweep(self.config.wfd_script_dir)
         if left:
             self.log(f"cannot empty the script folder: {_names(left)} left (in use?)", "error")
@@ -565,7 +771,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def refresh_masks(self):
         """Mask numbers found in the phase mask folder, and the Generate button: STOP while generating, locked while
-        cleaning up after an abort, yellow while a Wavefront folder is not empty."""
+        cleaning up after an abort, yellow while a Wavefront folder holds files that are not Oriole's own script."""
         current = self.combo_mask.currentText()
         self.combo_mask.clear()
         self.combo_mask.addItems([str(n) for n in holo.available_masks(self.config.wfd_output_dir)])
@@ -576,7 +782,7 @@ class MainWindow(QtWidgets.QMainWindow):
             state = ("CLEANING UP…", STOP_STYLE, "waiting for Wavefront to finish before sweeping")
         elif self.generation is not None:
             state = ("■ STOP", STOP_STYLE, "stop the generation (both Wavefront folders are emptied after it)")
-        elif any(holo.files_in(folder) for folder in self._wavefront_folders()):
+        elif not self.jobs and any(holo.files_in(folder) for folder in self._wavefront_folders()):
             state = ("GENERATE PHASE MASKS", BLOCKED_STYLE, "a Wavefront folder is not empty: Generate asks to sweep it")
         else:
             state = ("GENERATE PHASE MASKS", ACTION_STYLE, "")
@@ -594,7 +800,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if not Path(out_dir).is_dir() or not Path(script_dir).is_dir():
             self.log(f"Wavefront folders not found ({script_dir}, {out_dir})", "error")
             return
-        if not self._have_spots() or not self._sweep_before_generating():
+        if not self._have_spots() or self._wavefront_missing(log=True):
+            return
+        if self.jobs:                                   # a Load or a check still waiting: the masks replace it
+            self.jobs = []
+            self._purge_scripts(quiet=True)
+        if not self._sweep_before_generating():
             return
         fits = self._field_fits()
         if fits is None:
@@ -602,7 +813,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cal, d = self.config.holo, self.spin_diam.value()
         spots_um = cal.to_um(self.spots, self.image.shape)
         names = [holo.mask_name(k + 1) for k in range(len(spots_um))]
-        self.jobs = [Job(name, holo.mask_script(name, x, y, d), holo.mask_png(out_dir, name), k)
+        self.jobs = [Job("mask", name, holo.mask_script(name, x, y, d), holo.mask_png(out_dir, name), k)
                      for k, (name, (x, y)) in enumerate(zip(names, spots_um))]
         self.generation = {"spots_px": list(self.spots), "spots_um": spots_um, "diameter": d, "cal": cal,
                            "fits": fits}
@@ -682,15 +893,15 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             holo.send_script(self.config.wfd_script_dir, job.js)
         except Exception as e:  # noqa: BLE001
-            if job.png is None:
-                self.jobs = []
-                self.log(f"cannot load {job.name}: {e}", "error")
-            else:
+            if job.kind == "mask":
                 self._abort(f"cannot send the {job.name} script: {e}")
+            else:
+                self.jobs = []
+                self.log(f"cannot send the {job.what}: {e}", "error")
             return False
         job.sent, job.taken = time.time(), None
         self.timer.start()
-        if job.png is not None:
+        if job.kind == "mask":
             again = f", attempt {job.attempt}/{holo.MAX_ATTEMPTS}" if job.attempt > 1 else ""
             self.log(f"Wavefront: computing {job.name} ({job.spot + 1} of {len(self.generation['spots_px'])}{again})")
         return True
@@ -711,9 +922,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._retry(f"Wavefront did not take the {job.what} within {holo.NOT_READ_S:.0f} s", NOT_TAKEN_FIX)
                 return
             job.taken = now
-        if job.png is None:                             # a Load: done once taken
+            if not self.wf_mode:                        # it takes scripts: in script mode
+                self.wf_mode = True
+                self._show_wavefront()
+        if job.kind != "mask":                          # a Load or a check: done once taken
             self.jobs = []
             self.timer.stop()
+            if job.kind == "check":
+                self.log("Wavefront IV takes scripts: script mode ✓")
+            self.refresh_masks()
         elif holo.mask_saved(job.png, job.sent):
             if self._mask_holds_its_spot(job):
                 self._next_job()
@@ -756,14 +973,21 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _retry(self, problem: str, fix: str):
         """Erase the script and send it again, MAX_ATTEMPTS sends in all; then abort the generation, or give up the
-        Load."""
+        Load. A check is sent once: not taken, Wavefront is not in script mode."""
         job = self.jobs[0]
+        if job.kind == "check":
+            self._purge_scripts(quiet=True)
+            self.jobs, self.wf_mode = [], False
+            self._show_wavefront()
+            self.refresh_masks()
+            self.log(f"{problem}: Wavefront IV is not in script mode; {AUTOLOAD_HINT}", "error")
+            return
         problem += f" (attempt {job.attempt}/{holo.MAX_ATTEMPTS})"
         if self._purge_scripts(quiet=True) and job.attempt < holo.MAX_ATTEMPTS:
             self.log(f"{problem}: script erased, sending it again", "warn")
             job.attempt += 1
             self._send()
-        elif job.png is not None:
+        elif job.kind == "mask":
             self._abort(problem, fix)
         else:
             self.jobs = []
@@ -814,11 +1038,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.combo_mask.currentText():
             self.log(f"no {holo.PREFIX}<n> mask in {self.config.wfd_output_dir}", "warn")
             return
+        if self._wavefront_missing(log=True) or not self._purge_scripts():
+            return
         n = int(self.combo_mask.currentText())
         name = holo.mask_name(n)
-        if not self._purge_scripts():
-            return
-        self.jobs = [Job(name, holo.load_script(holo.mask_png(self.config.wfd_output_dir, name)))]
+        self.jobs = [Job("load", name, holo.load_script(holo.mask_png(self.config.wfd_output_dir, name)))]
         if not self._send():
             return
         self.log(f"SLM: loading {name}")
@@ -866,11 +1090,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _on_diameter(self, value: float):
         self.config.spot_diameter_um = value
+        self.save_config()
         self.redraw_spots()
 
     def _on_calibration(self):
         self.config.visual_cal = self.visual_box.calibration().to_dict()
         self.config.holo_cal = self.holo_box.calibration().to_dict()
+        self.save_config()
         self.redraw_spots()
         self.redraw_field()
 
@@ -878,6 +1104,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config.show_slm_field = show
         self.save_config()
         self.redraw_field()
+
+    def _on_start_wavefront(self, on: bool):
+        self.config.start_wavefront = on
+        self.save_config()
 
     def _on_wavefront_root(self, root: str):
         self.config.wfd_root = root
@@ -888,6 +1118,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log(f"folder not found: {d}", "warn")
         self._watch_folders()
         self.refresh_masks()
+        if wavefront.SUPPORTED:
+            self.wf_ready = False                       # seen again as just ready: its folder and mode checked
+            self._watch_wavefront()
 
     def _on_shutter_output(self, *_):
         self.config.nidaq_device = self.edit_device.text().strip() or "Dev1"
@@ -898,6 +1131,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_shutter_output()
 
     def closeEvent(self, ev):
+        self.feed.live = False
+        self.wf_timer.stop()
+        self.wf_check.stop()
         if self.generation is not None:
             self._abort("window closed", level="warn")
         if self.cleanup is not None:
@@ -914,5 +1150,6 @@ def run(config: Config | None = None, config_path=DEFAULT_CONFIG_PATH) -> int:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     apply_dark_theme(app)
     win = MainWindow(config or Config.load(config_path), config_path)
+    sys.excepthook = win.internal_error
     win.show()
     return app.exec()

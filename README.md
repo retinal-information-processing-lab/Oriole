@@ -24,14 +24,20 @@ python -m pytest tests           # self-tests
 ```
 
 The shutter needs `nidaqmx` and the NI-DAQmx driver; without them Oriole runs and logs the error.
+*Snap* / *Live* need `pyjavaz` (in `environment.yml`; an `oriole` env made before it:
+`conda activate oriole` then `pip install pyjavaz`). An error Oriole did not foresee is logged in
+red, its details in `~/.oriole/oriole.log`, and Oriole goes on; an unreadable `config.json` gives
+the default settings (the file is kept as `config.json.bad`).
 
 ## The window
 
 ```
  VISUAL · DMD          image                                  HOLO · SLM
- Settings              Load image…  Spot Ø  Undo  Clear       Settings
-  DMD rows / columns                                           Wavefront folder, 🧹 sweeps
-  pixel size            left click: add a spot                 shutter device + output
+ Settings              Load image… Snap Live  Spot Ø  Undo    Settings
+  DMD rows / columns                         Clear             Wavefront folder
+  pixel size            left click: add a spot                  Wavefront: script mode ✓  Check
+                                                                script / phase mask folders 📂 🧹
+                                                                shutter device + output
  Calibration            right click on a spot: remove it      Calibration
   X  Y  rotation        (spots are numbered 1..N)              X  Y  rotation
   stretch X / Y                                                stretch X / Y
@@ -56,6 +62,15 @@ Wavefront in µm. Visual µm are relative to the DMD frame centre and divided by
 size (2.5 µm, visual *Settings*). The line under the image shows where the mouse falls in both.
 
 **Spot Ø** is the diameter of every spot, in µm on the sample.
+
+**Snap** / **Live** take the image from Micro-Manager, which keeps the camera: Oriole asks the
+running Micro-Manager, through its pycro-manager server (Micro-Manager: *Tools → Options → Run
+pycro-manager server on port 4827*, ticked once), for a snap at the epi settings, 1000 ms exposure
+and binning 2×2 (set on the camera first if they differ), or, while Micro-Manager's own live mode
+runs, for its latest frame (its settings then left alone). *Live* takes one image after the other
+(about one a second at 1000 ms; four a second at most from Micro-Manager's live) until pressed
+again; the spots stay, and the image is logged once. Micro-Manager not running, or its server off:
+said in the log after half a second.
 
 The epi image is expected binned 2×2, at **672 × 512 px** (width × height), the size the
 calibrations are made for. Any other size gives a big red "WRONG IMAGE SIZE" banner above the holo
@@ -102,11 +117,29 @@ folder)* selected): one mask per spot, saved by Wavefront as `Pattern1_000.algoP
   left (still being saved or open), 10 sweeps at most: Generate is ready again.
 * `Pattern_spots.json` next to the masks says which spot each mask is.
 
-**Wavefront folder** (holo *Settings*, `E:\wfdIV_20261022` by default): the scripts go to its
+**Wavefront folder** (holo *Settings*, `E:\wfdIV_20261022` by default): the Wavefront IV install
+(`wfdIV.exe`, a launcher that runs the program itself, `wfdIVCore.dll`). The scripts go to its
 `script\` and the masks are read from its `GeneratedPhasemasks\`; both paths are shown below it.
+Wavefront's licence expires now and then (its fix: *Wavefront IV Errorcode 7536725.pdf* on the
+desktop), and it is then installed again in a new folder: pick that one.
 The 🧹 next to the script folder sweeps it clean at once, the one next to the phase mask folder
 after a confirmation (it lists how many files and their dates). 📂 opens the phase mask folder in
 the file explorer.
+
+**Starting Wavefront.** When Oriole opens and Wavefront is not running (*start Wavefront with
+Oriole*, holo *Settings*), or with **Start**, Oriole starts it from the Wavefront folder in script
+mode. As tried on the rig, Wavefront reads its settings, shared by every install, from
+`%APPDATA%\wfdIV\wfdIV.ini` when it starts: Oriole sets `[scriptEngine] autoload=true` (*Tools →
+Script engine → auto load (script folder)*) and `[mainSettings] rootPath` (the folder masks are
+saved in: this install's `GeneratedPhasemasks`) there first, every other line left as it is. The
+line under the folder says Wavefront's state (checked every second): not running, starting…,
+running, *script mode ✓*, *NOT in script mode*, or *another install* (it runs from another folder,
+where it reads its scripts: an error in the log, Generate and Load refused). Once it is ready (its
+window open) Oriole sends it a script that does nothing (**Check** does it again): taken, it is in
+script mode. A core that is empty or missing (licence), or a Wavefront that does not start within
+20 s, is said in the log, with the other installs next to it. Closing Wavefront asks to confirm:
+Oriole never closes it (it keeps running when Oriole closes). Generate and Load say at once when
+Wavefront is not running.
 
 **Wavefront's field on the image**, through the holo calibration, as Wavefront draws it (measured
 on its display, in µm around its (0, 0)): its square (the 576 px canvas, ±187.8 µm) as a red
@@ -134,6 +167,8 @@ on exit: close it before starting a Plerion protocol.
 ```
 oriole/
   calibration.py  the 5-number manual calibration, the expected epi image size
+  camera.py       Snap / Live from the running Micro-Manager (pycro-manager server, pyjavaz)
+  wavefront.py    Wavefront IV the program: start (script mode, wfdIV.ini), installs, processes
   visual.py       spots -> DMD discs, spot bin + json, merge into a linked bin
   holo.py         Wavefront scripts and field, script drop, mask checks, folder sweeps, spot record
   shutter.py      NI-DAQ analog-output shutter
@@ -143,7 +178,5 @@ oriole/
   theme.py        colours and styles (dark theme from Plerion)
   widgets.py      the image view (spots, SLM ring, Wavefront's field), calibration box, small factories
   gui.py          the window: settings, spots, extract / merge, Wavefront jobs (generate, Load), shutter
-tests/            pytest (Wavefront and NI-DAQ simulated)
+tests/            pytest (Wavefront, Micro-Manager and NI-DAQ simulated)
 ```
-
-Later: Micro-Manager as the image source (snap, then live) through `MainWindow.set_image`.

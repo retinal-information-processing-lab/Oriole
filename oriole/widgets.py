@@ -221,10 +221,12 @@ class ImageView(pg.GraphicsLayoutWidget):
         self.labels: list[pg.TextItem] = []
         self.scene().sigMouseMoved.connect(self._on_mouse)
 
-    def set_image(self, image: np.ndarray):
+    def set_image(self, image: np.ndarray, fit: bool = True):
+        """Show ``image`` with contrast from its own 1-99.7 % percentiles; ``fit`` the view to it (a new size)."""
         lo, hi = np.percentile(image, [1, 99.7])
         self.image_item.setImage(image, levels=(lo, hi if hi > lo else lo + 1))
-        self.vb.autoRange(items=[self.image_item])
+        if fit:
+            self.vb.autoRange(items=[self.image_item])
 
     def show_placeholder(self):
         self.image_item.setImage(camera_target(), levels=(0, 255))
@@ -255,19 +257,21 @@ class ImageView(pg.GraphicsLayoutWidget):
             item.setVisible(square is not None)
 
     def set_spots(self, spots, diameter_px: float):
-        for lbl in self.labels:
-            self.vb.removeItem(lbl)
+        """Red discs numbered from 1 (the number labels are kept from one call to the next: a drag redraws often)."""
         pts = np.asarray(spots, dtype=float).reshape(-1, 2)
         self.spot_item.setData(pos=pts, size=diameter_px)
-        self.labels = []
-        for k, (x, y) in enumerate(pts):
-            lbl = pg.TextItem(str(k + 1), color=SPOT, anchor=(0.5, 1.0))
+        while len(self.labels) > len(pts):
+            self.vb.removeItem(self.labels.pop())
+        while len(self.labels) < len(pts):
+            lbl = pg.TextItem(color=SPOT, anchor=(0.5, 1.0))
             lbl.setFont(QtGui.QFont("Segoe UI", 11, QtGui.QFont.Weight.Bold))
             lbl.setAcceptedMouseButtons(NO_MOUSE)
             lbl.setZValue(20)
-            lbl.setPos(x, y - diameter_px / 2)
             self.vb.addItem(lbl)
             self.labels.append(lbl)
+        for k, (lbl, (x, y)) in enumerate(zip(self.labels, pts)):
+            lbl.setText(str(k + 1))
+            lbl.setPos(x, y - diameter_px / 2)
 
     def set_slm_spot(self, xy, diameter_px: float = 0.0):
         """Ring around the spot whose phase mask is on the SLM; None hides it."""

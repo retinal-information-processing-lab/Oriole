@@ -14,11 +14,13 @@ pg = pytest.importorskip("pyqtgraph")
 from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from oriole.binfile import read_header  # noqa: E402
+from oriole.camera import CameraError  # noqa: E402
 from oriole.config import Config  # noqa: E402
 from oriole.gui import MainWindow, apply_dark_theme  # noqa: E402
-from oriole import holo  # noqa: E402
+from oriole import holo, wavefront  # noqa: E402
 from oriole.shutter import ShutterError  # noqa: E402
 from tests.conftest import EXISTING_BIN  # noqa: E402
+from tests.test_camera import wait_for  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -52,7 +54,8 @@ def window(qapp, tmp_path, monkeypatch):
         asked.append((title, text, choices))
         return answers[title]
     monkeypatch.setattr(MainWindow, "_choose", choose)
-    cfg = Config(wfd_root=str(tmp_path / "wfd"))
+    monkeypatch.setattr("oriole.wavefront.SUPPORTED", False)       # the Wavefront of this PC is never touched
+    cfg = Config(wfd_root=str(tmp_path / "wfd"), start_wavefront=False)
     for d in (cfg.wfd_script_dir, cfg.wfd_output_dir):
         os.makedirs(d)
     w = MainWindow(cfg, config_path=tmp_path / "cfg.json")
@@ -615,3 +618,137 @@ def test_failures_are_logged(window, monkeypatch):
     monkeypatch.setattr("oriole.shutter._new_task", no_daq)
     w.btn_open.click()
     assert not w.shutter.is_open and "nidaqmx is not installed" in log()
+
+
+def test_wavefront_started_checked_and_watched(window, tmp_path, monkeypatch):
+    w = window
+    log = w.log_view.toPlainText
+    root, ini = Path(w.config.wfd_root), tmp_path / "wfdIV.ini"
+    procs, started = {}, []                             # Wavefront's processes on a pretend PC
+    monkeypatch.setattr("oriole.wavefront.SUPPORTED", True)
+    monkeypatch.setattr("oriole.wavefront.INI_PATH", ini)
+    monkeypatch.setattr("oriole.wavefront.running", lambda: dict(procs))
+    monkeypatch.setattr("oriole.wavefront.window_open", lambda pid: pid == 2)
+    monkeypatch.setattr("oriole.wavefront.start", lambda folder: started.append(Path(folder)))
+    w._watch_wavefront()
+    assert w.lbl_wavefront.text() == "Wavefront: not running" and w.btn_wavefront.text() == "Start"
+
+    # Start: not an install; then an install: its settings made for script mode, then started
+    w.btn_wavefront.click()
+    assert f"cannot start Wavefront IV: no wfdIV.exe in {root}" in log() and not started
+    for name in ("wfdIV.exe", "wfdIVCore.dll"):
+        (root / name).write_bytes(b"x")
+    w.btn_wavefront.click()
+    assert started == [root] and "set in wfdIV.ini: scriptEngine/autoload, mainSettings/rootPath" in log()
+    assert wavefront.read_ini("scriptEngine", "autoload", ini) == "true"
+    assert w.lbl_wavefront.text() == "Wavefront: starting…" and not w.btn_wavefront.isEnabled()
+
+    # ready (its window open): checked 2 s later with a script that does nothing
+    procs.update(launcher=(1, root), core=(2, root))
+    w._watch_wavefront()
+    assert w.lbl_wavefront.text() == "Wavefront: running" and w.btn_wavefront.text() == "Check"
+    assert w.wf_check.isActive()
+    w.wf_check.stop()
+    w._check_when_idle()                                # what the 2 s timer does
+    script = Path(w.config.wfd_script_dir) / "test.js"
+    assert script.read_text() == holo.CHECK_SCRIPT and w.btn_generate.text() == "GENERATE PHASE MASKS"
+    assert "#00FF00" in w.btn_generate.styleSheet()     # Oriole's own script: not a reason to turn yellow
+    _simulate_wavefront(w)
+    assert "takes scripts: script mode ✓" in log() and w.lbl_wavefront.text() == "Wavefront: script mode ✓"
+
+    # Check again, not taken: not in script mode
+    monkeypatch.setattr("oriole.holo.NOT_READ_S", -1)
+    w.btn_wavefront.click()
+    w.poll()
+    assert "did not take the check script within -1 s: Wavefront IV is not in script mode; check that" in log()
+    assert w.lbl_wavefront.text() == "Wavefront: NOT in script mode" and not any(script.parent.iterdir())
+
+    # closed: Generate and Load say so at once
+    procs.clear()
+    w._watch_wavefront()
+    w.set_image(np.zeros((512, 672), np.float32))
+    w._on_click(100.0, 100.0, False)
+    w.generate()
+    assert "Wavefront IV is not running: press Start" in log().splitlines()[-1] and not w.jobs
+
+    # running from another install: said once, Generate refused
+    other = tmp_path / "wfdIV_old"
+    procs.update(core=(2, other))
+    w._watch_wavefront()
+    w._watch_wavefront()
+    assert log().count(f"Wavefront IV runs from {other}, not from the Wavefront folder") == 1
+    assert "another install" in w.lbl_wavefront.text() and not w.wf_check.isActive()
+    w.generate()
+    assert log().count(f"Wavefront IV runs from {other}") == 2 and not w.jobs
+
+    # started but its program never runs: the licence
+    procs.clear()
+    w._watch_wavefront()
+    procs.update(launcher=(1, root))
+    w.btn_wavefront.click()
+    w.wf_started -= 30
+    w._watch_wavefront()
+    assert "Wavefront IV did not start (see its own message): the licence expired?" in log()
+
+    # Oriole opening starts it (setting kept in the config)
+    w.chk_start_wavefront.setChecked(True)
+    assert json.loads(Path(w.config.path).read_text())["start_wavefront"] is True
+    procs.clear()
+    started.clear()
+    w2 = MainWindow(Config(wfd_root=str(root)), config_path=tmp_path / "cfg2.json")
+    QtWidgets.QApplication.processEvents()
+    assert started == [root]
+    w2.close()
+
+
+def test_micro_manager_snap_and_live(window, monkeypatch):
+    w = window
+    log = w.log_view.toPlainText
+    monkeypatch.setattr("oriole.camera.LIVE_PERIOD_S", 0.005)
+
+    class Source:
+        def __init__(self):
+            self.n, self.error = 0, None
+
+        def frame(self):
+            if self.error:
+                raise CameraError(self.error)
+            self.n += 1
+            return np.full((512, 672), self.n, np.uint16), False
+    w.feed.source = src = Source()
+    w.btn_snap.click()
+    assert not w.btn_snap.isEnabled()
+    wait_for(lambda: w.image is not None)
+    assert "image Micro-Manager snap: 672 x 512 px" in log() and w.btn_snap.isEnabled() and w.lbl_image_warning.isHidden()
+    w._on_click(100.0, 100.0, False)
+
+    # live: one image after the other, logged once, the spots kept
+    w.btn_live.click()
+    assert w.btn_live.isChecked() and not w.btn_snap.isEnabled() and "Micro-Manager live: on" in log()
+    wait_for(lambda: src.n >= 5 and w.image[0, 0] >= 4)
+    assert log().count("image Micro-Manager live: 672 x 512 px") == 1 and w.spots == [(100.0, 100.0)]
+    w.btn_live.click()
+    wait_for(lambda: not w.feed.busy)
+    QtWidgets.QApplication.processEvents()
+    assert "Micro-Manager live: off" in log() and w.btn_snap.isEnabled()
+
+    # Micro-Manager not there: said, live off
+    src.error = "Micro-Manager not found on port 4827: start it"
+    w.btn_live.click()
+    wait_for(lambda: not w.btn_live.isChecked())
+    assert "Micro-Manager not found on port 4827" in log() and w.btn_snap.isEnabled() and not w.feed.busy
+
+
+def test_internal_errors_and_unreadable_settings_are_logged(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr("oriole.wavefront.SUPPORTED", False)
+    monkeypatch.setattr("oriole.gui.LOG_PATH", tmp_path / "oriole.log")
+    cfg = Config(wfd_root=str(tmp_path), start_wavefront=False, load_error="settings file x unreadable")
+    w = MainWindow(cfg, config_path=tmp_path / "cfg.json")
+    try:
+        raise ValueError("boom")
+    except ValueError as e:
+        w.internal_error(type(e), e, e.__traceback__)
+    assert "settings file x unreadable" in w.log_view.toPlainText()
+    assert "internal error (ValueError: boom), details in" in w.log_view.toPlainText()
+    assert 'raise ValueError("boom")' in (tmp_path / "oriole.log").read_text()
+    w.close()

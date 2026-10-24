@@ -60,6 +60,9 @@ def mask_script(profile: str, x_um: float, y_um: float, diameter_um: float) -> s
     return "\n".join(lines) + "\n"
 
 
+CHECK_SCRIPT = "// Oriole: is Wavefront in script mode? (this script does nothing)\n"   # taken: it is
+
+
 def load_script(png_path) -> str:
     """Show a saved phase mask on the SLM (Plerion modules/slm.py), Wavefront's pattern list emptied first: the
     loaded mask is then its only pattern, ID 0."""
