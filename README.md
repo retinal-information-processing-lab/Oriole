@@ -33,8 +33,8 @@ the default settings (the file is kept as `config.json.bad`).
 
 ```
  VISUAL · DMD          image                                  HOLO · SLM
- Settings              Load image… Snap Live  Spot Ø  Undo    Settings
-  DMD rows / columns                         Clear             Wavefront folder
+ Settings              Load image… Snap Live Update   Spot Ø   Settings
+  DMD rows / columns    Undo Clear Reset                        Wavefront folder
   pixel size            left click: add a spot                  Wavefront: script mode ✓  Check
                                                                 script / phase mask folders 📂 🧹
                                                                 shutter device + output
@@ -61,7 +61,8 @@ Holo default = `DHparams.m`: X 5, Y -8, rotation 0, stretch 0.67 / -0.67 (mirror
 Wavefront in µm. Visual µm are relative to the DMD frame centre and divided by the DMD pixel
 size (2.5 µm, visual *Settings*). The line under the image shows where the mouse falls in both.
 
-**Spot Ø** is the diameter of every spot, in µm on the sample.
+**Spot Ø** is the diameter of every spot, in µm on the sample. **Reset** (next to Undo / Clear) goes
+back to how Oriole opens: no image (the camera target), no spot, no Undo, no SLM ring, Live off.
 
 **Snap** / **Live** take the image from Micro-Manager, which keeps the camera. Oriole talks to it
 through its pycro-manager server (in Micro-Manager, tick *Tools → Options → Run pycro-manager server
@@ -75,6 +76,8 @@ Oriole left the Hamamatsu sending black frames until Micro-Manager was restarted
   * A frame that fails is skipped (said in the log); 3 failures in a row switch Live off.
   * A frame that doesn't change for 5 s (frozen camera; "and black" when it is all zero) is said
     in the log.
+* **Update** takes the image Micro-Manager's Snap/Live window shows: your last Snap there, with your
+  settings, or its live frame. Nothing is taken: the camera isn't touched.
 * **Camera settings:** Oriole never changes them. It logs them (binning, exposure) when they
   change, in yellow when they differ from the epi settings (2×2, 1000 ms): set those in
   Micro-Manager.

@@ -41,11 +41,13 @@ HELP_HTML = f"""
 <p><b>Load image…</b> an epi image binned 2×2, {EPI_SIZE[0]} × {EPI_SIZE[1]} px (any other size: big red
 warning), or take it from Micro-Manager, which keeps the camera: <b>Snap</b> is Micro-Manager's own Snap (or its
 current live frame while its live runs), <b>Live</b> switches Micro-Manager's own live on and shows its frames
-(stopping it in Micro-Manager stops it here too). Oriole never changes the camera settings: set binning
+(stopping it in Micro-Manager stops it here too), <b>Update</b> takes the image Micro-Manager's window shows (your last
+Snap there, or its live frame) without taking one. Oriole never changes the camera settings: set binning
 {camera.EPI_BINNING} and {camera.EPI_EXPOSURE_MS:.0f} ms in Micro-Manager (the log says when they differ). Micro-Manager must
 be running with Tools → Options → <i>Run pycro-manager server on port {camera.PORT}</i> ticked.<br>
 <b>Left click</b> adds a spot, <b>drag</b> a spot to move it, <b>right click</b> on a spot removes it.
-<b>Undo</b> / <b>Clear</b>. <b>Spot Ø</b> is the diameter of every spot on the sample (µm).</p>
+<b>Undo</b> / <b>Clear</b>. <b>Reset</b> goes back to how Oriole opens: no image, no spot, no SLM ring, Live off.
+<b>Spot Ø</b> is the diameter of every spot on the sample (µm).</p>
 <h3>Calibrations (typed by hand, one per side)</h3>
 <p>µm = R(−rotation) · diag(stretch X, stretch Y) · (pixel + 0.5 − image centre) + (X, Y)<br>
 Stretches are µm per camera pixel; a negative stretch mirrors. Holo default = DHparams.m
@@ -163,6 +165,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.config_path = config_path
         self.image: np.ndarray | None = None
         self.image_source = ""
+        self.frames_wanted = True                       # False after Reset, until Snap, Update or Live
         self.spots: list[tuple[float, float]] = []      # camera px
         self.undo_stack: list[list[tuple[float, float]]] = []
         self.dragging: int | None = None                # spot being dragged
@@ -259,13 +262,20 @@ class MainWindow(QtWidgets.QMainWindow):
                                "QPushButton:checked { background: #8B1A1A; color: white; }")
         self.btn_live.setCheckable(True)
         self.btn_live.toggled.connect(self._on_live)
-        bar.addWidget(self.btn_snap)
-        bar.addWidget(self.btn_live)
+        self.btn_update = button("Update", self.update_from_micro_manager,
+                                 f"The image Micro-Manager shows (your last Snap there, or its live frame): nothing "
+                                 f"taken {mm}")
+        for btn in (self.btn_snap, self.btn_live, self.btn_update):
+            bar.addWidget(btn)
         bar.addWidget(QtWidgets.QLabel("  Spot Ø"))
         self.spin_diam = spin_box(self.config.spot_diameter_um, 0.5, 2000, " µm", 1, slot=self._on_diameter)
+        self.spin_diam.setMaximumWidth(90)
         bar.addWidget(self.spin_diam)
         bar.addWidget(button("Undo", self.undo))
         bar.addWidget(button("Clear", self.clear))
+        self.btn_reset = button("Reset", self.reset_image, "Back to how Oriole opens: no image, no spot, no SLM ring "
+                                                           "(Live off)")
+        bar.addWidget(self.btn_reset)
         bar.addStretch(1)
         self.lbl_count = QtWidgets.QLabel()
         bar.addWidget(self.lbl_count)
@@ -485,25 +495,55 @@ class MainWindow(QtWidgets.QMainWindow):
                  f"and everything extracted or generated from this image would be wrong.", "error")
 
     def snap(self):
+        self._ask_micro_manager(self.feed.snap)
+
+    def update_from_micro_manager(self):
+        self._ask_micro_manager(self.feed.show)
+
+    def _ask_micro_manager(self, request):
+        """One image from Micro-Manager (Snap or Update): both buttons wait for it."""
         if self.feed.busy:
             return
-        self.btn_snap.setEnabled(False)
-        self.feed.snap()
+        self.frames_wanted = True
+        self._enable_one_image_buttons(False)
+        request()
+
+    def _enable_one_image_buttons(self, on: bool):
+        for btn in (self.btn_snap, self.btn_update):
+            btn.setEnabled(on)
 
     def _on_live(self, on: bool):
+        if on:
+            self.frames_wanted = True
         self.feed.set_live(on)
-        self.btn_snap.setEnabled(not on and not self.feed.busy)
+        self._enable_one_image_buttons(not on and not self.feed.busy)
         self.log("Micro-Manager live: on" if on else "Micro-Manager live: off")
 
-    def _on_frame(self, image, mm_live: bool):
-        source = "Micro-Manager live" if self.feed.live or mm_live else "Micro-Manager snap"
-        self.set_image(image, source, announce=source != self.image_source or not self.feed.live)
-        self.btn_snap.setEnabled(not self.btn_live.isChecked())
+    def _on_frame(self, image, kind: str):
+        self._enable_one_image_buttons(not self.btn_live.isChecked())
+        if not self.frames_wanted:                      # still on its way when Reset was pressed
+            return
+        source = {"snap": "Micro-Manager snap", "shown": "Micro-Manager's image"}.get(kind, "Micro-Manager live")
+        self.set_image(image, source, announce=source != self.image_source or kind != "live")
 
     def _on_camera_ended(self, message: str, level: str):
         self.log(message, level)
         self.btn_live.setChecked(False)
-        self.btn_snap.setEnabled(True)
+        self._enable_one_image_buttons(True)
+
+    def reset_image(self):
+        """Back to how Oriole opens: no image (the camera target), no spot, no Undo, no SLM ring, Live off."""
+        self.btn_live.setChecked(False)
+        self.frames_wanted = False
+        self.image, self.image_source = None, ""
+        self.spots, self.undo_stack, self.dragging, self.slm_spot = [], [], None, None
+        self.view.show_placeholder()
+        self.view.unsetCursor()
+        self.redraw_field()
+        self.redraw_spots()
+        self.lbl_image_warning.hide()
+        self.lbl_mouse.setText(" ")
+        self.log("reset: no image, no spot")
 
     def _on_click(self, x: float, y: float, right: bool):
         if self.image is None:

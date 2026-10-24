@@ -88,6 +88,17 @@ class MicroManager:
             return self._image(core, core.get_image())
         return self._call(snap)
 
+    def shown(self) -> np.ndarray:
+        """The image Micro-Manager's Snap/Live window shows (its last Snap, or its live frame): nothing taken."""
+        def shown(core, live):
+            display = live.get_display()
+            images = display.get_displayed_images() if display is not None else None
+            if images is None or images.size() == 0:
+                raise CameraError("Micro-Manager shows no image yet: press Snap (or Live) there first")
+            image = images.get(0)
+            return np.asarray(image.get_raw_pixels()).reshape(image.get_height(), image.get_width())
+        return self._call(shown)
+
     def live_on(self) -> bool:
         return bool(self._call(lambda core, live: live.is_live_mode_on()))
 
@@ -110,14 +121,15 @@ class MicroManager:
 
 
 class Feed(QtCore.QObject):
-    """Images from Micro-Manager, taken in a thread of their own: one (snap), or one after the other while ``live``.
+    """Images from Micro-Manager, in a thread of their own: one (``snap``: its Snap; ``show``: the image its window
+    shows, nothing taken), or one after the other while ``live``.
 
     Live switches Micro-Manager's own live mode on (when it is not already), then reads its frames: stopping it in
     Micro-Manager stops it here too, and stopping it here stops Micro-Manager's only if Oriole had switched it on.
     A frame that fails is skipped, MAX_FAILURES in a row end the live; a frame unchanged for FROZEN_S is said.
     """
 
-    frame = QtCore.pyqtSignal(object, bool)         # image, from a live stream
+    frame = QtCore.pyqtSignal(object, str)          # image, how it came: "snap", "shown" or "live"
     note = QtCore.pyqtSignal(str, str)              # text, log level: settings, skipped frame, frozen camera
     ended = QtCore.pyqtSignal(str, str)             # text, log level: the snap or live failed, or live stopped
 
@@ -127,6 +139,7 @@ class Feed(QtCore.QObject):
         self.live = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._job = "snap"                          # what a thread started without live does: "snap" or "shown"
         self._settings: tuple[str, float] | None = None
 
     @property
@@ -134,7 +147,10 @@ class Feed(QtCore.QObject):
         return self._thread is not None
 
     def snap(self):
-        self._start()
+        self._start("snap")
+
+    def show(self):
+        self._start("shown")
 
     def set_live(self, on: bool):
         self.live = on
@@ -148,9 +164,10 @@ class Feed(QtCore.QObject):
         if thread is not None:
             thread.join(wait_s)
 
-    def _start(self):
+    def _start(self, job: str = "snap"):
         with self._lock:
             if self._thread is None:
+                self._job = job
                 self._thread = threading.Thread(target=self._run, name="Micro-Manager", daemon=True)
                 self._thread.start()
 
@@ -180,7 +197,8 @@ class Feed(QtCore.QObject):
         try:
             exposure_s = self._report_settings()
             if not self.live:
-                self.frame.emit(self.source.snap(), False)
+                image = self.source.snap() if self._job == "snap" else self.source.shown()
+                self.frame.emit(image, self._job)
             while not self._end():                  # live (switched on during the snap, or again meanwhile)
                 reason = self._run_live(exposure_s)
                 if reason:
@@ -222,7 +240,7 @@ class Feed(QtCore.QObject):
                                        f"camera stuck? (see Micro-Manager; restarting it frees the camera)", "warn")
                 else:
                     last, same_since, said = image, t0, False
-                    self.frame.emit(image, True)
+                    self.frame.emit(image, "live")
                 time.sleep(max(0.0, LIVE_PERIOD_S - (time.monotonic() - t0)))
             return None
         finally:

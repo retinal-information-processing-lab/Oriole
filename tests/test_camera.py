@@ -12,11 +12,51 @@ from oriole import camera  # noqa: E402
 from oriole.camera import CameraError, Feed, MicroManager  # noqa: E402
 
 
+class FakeList:
+    """A Java List, as the bridge shows it."""
+
+    def __init__(self, items):
+        self.items = items
+
+    def size(self):
+        return len(self.items)
+
+    def get(self, i):
+        return self.items[i]
+
+
+class FakeImage:
+    def __init__(self, value):
+        self.value = value
+
+    def get_raw_pixels(self):
+        return np.full(512 * 672, self.value, np.uint16)
+
+    def get_width(self):
+        return 672
+
+    def get_height(self):
+        return 512
+
+
+class FakeDisplay:
+    """Micro-Manager's Snap/Live window."""
+
+    def __init__(self, images):
+        self.images = images
+
+    def get_displayed_images(self):
+        return FakeList(self.images)
+
+
 class FakeLive:
     """Micro-Manager's live manager (studio.live()), as the bridge shows it."""
 
     def __init__(self, core):
-        self.core, self.calls = core, []
+        self.core, self.calls, self.display = core, [], None
+
+    def get_display(self):
+        return self.display
 
     def is_live_mode_on(self):
         return self.core.sequence
@@ -84,6 +124,19 @@ def test_snap_is_micro_managers_and_settings_are_only_read():
     assert mm.snap()[0, 0] == 7 and mm._live.calls == [("snap", True)]
 
 
+def test_shown_is_what_micro_managers_window_shows():
+    mm = _mm(FakeCore())
+    with pytest.raises(CameraError, match="Micro-Manager shows no image yet: press Snap"):
+        mm.shown()                                      # no Snap/Live window yet
+    mm._live.display = FakeDisplay([])
+    with pytest.raises(CameraError, match="shows no image yet"):
+        mm.shown()
+    assert mm._core is not None                         # not a broken connection
+    mm._live.display = FakeDisplay([FakeImage(9)])
+    image = mm.shown()
+    assert image.shape == (512, 672) and image[0, 0] == 9 and mm._live.calls == []     # nothing taken
+
+
 def test_live_frames():
     core = FakeCore()
     mm = _mm(core)
@@ -135,6 +188,9 @@ class FakeSource:
         self.mm_live, self.settings_, self.n = live, settings, 0
         self.calls, self.fail, self.frozen = [], 0, False
 
+    def shown(self):
+        return np.full((4, 6), 100, np.uint16)
+
     def settings(self):
         return self.settings_
 
@@ -160,8 +216,8 @@ class FakeSource:
 
 class Recorder:
     def __init__(self, feed):
-        self.frames, self.notes, self.ended = [], [], []
-        feed.frame.connect(lambda image, live: self.frames.append(int(image[0, 0])))
+        self.frames, self.kinds, self.notes, self.ended = [], [], [], []
+        feed.frame.connect(lambda image, kind: (self.frames.append(int(image[0, 0])), self.kinds.append(kind)))
         feed.note.connect(lambda text, level: self.notes.append((text, level)))
         feed.ended.connect(lambda text, level: self.ended.append((text, level)))
 
@@ -175,8 +231,13 @@ def test_feed_snap_and_live_leave_micro_manager_as_found(qapp, monkeypatch):
     feed.snap()                                         # a snap still running: not another one
     wait_for(lambda: not feed.busy)
     QtWidgets.QApplication.processEvents()
-    assert rec.frames == [1] and rec.notes == [
+    assert rec.frames == [1] and rec.kinds == ["snap"] and rec.notes == [
         ("Micro-Manager camera: binning 1x1, 100 ms (epi images: 2x2, 1000 ms; set them in Micro-Manager)", "warn")]
+    feed.show()                                         # the image Micro-Manager shows: nothing taken
+    wait_for(lambda: not feed.busy)
+    QtWidgets.QApplication.processEvents()
+    assert rec.frames == [1, 100] and rec.kinds == ["snap", "shown"] and src.n == 1
+    rec.frames.clear()
 
     # live: Micro-Manager's own live switched on, its frames shown in order, switched off again after
     feed.set_live(True)
@@ -185,6 +246,7 @@ def test_feed_snap_and_live_leave_micro_manager_as_found(qapp, monkeypatch):
     wait_for(lambda: not feed.busy)
     QtWidgets.QApplication.processEvents()
     assert src.calls == [True, False] and not src.mm_live and rec.frames == sorted(set(rec.frames))
+    assert set(rec.kinds[2:]) == {"live"}
     assert len(rec.notes) == 1                          # settings unchanged: said once
 
     # its live already on (switched on in Micro-Manager): left on

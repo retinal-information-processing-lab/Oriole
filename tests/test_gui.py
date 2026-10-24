@@ -99,7 +99,8 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     w = window
     log = w.log_view.toPlainText
     assert not w.findChildren(pg.HistogramLUTWidget)                   # no power / contrast scale
-    assert not [b for b in w.findChildren(QtWidgets.QPushButton) if b.text() == "Reset"]
+    assert not [b for box in (w.visual_box, w.holo_box) for b in box.findChildren(QtWidgets.QPushButton)
+                if b.text() == "Reset"]                                 # calibrations: typed by hand only
     assert QtWidgets.QApplication.instance().palette().color(QtGui.QPalette.ColorRole.Window).name() == "#121212"
 
     # --- no image yet: the camera target placeholder (expected size) is shown, clicks only warn
@@ -749,6 +750,9 @@ def test_micro_manager_snap_and_live(window, monkeypatch):
         def last_frame(self):
             self.n += 1
             return np.full((512, 672), self.n, np.uint16)
+
+        def shown(self):                                # what Micro-Manager's window shows: nothing taken
+            return np.full((512, 672), 500, np.uint16)
     w.feed.source = src = Source()
     w.btn_snap.click()
     assert not w.btn_snap.isEnabled()
@@ -773,6 +777,29 @@ def test_micro_manager_snap_and_live(window, monkeypatch):
     src.mm_live = False
     wait_for(lambda: not w.btn_live.isChecked())
     assert "Micro-Manager's live was stopped: Oriole's Live too" in log() and w.btn_snap.isEnabled()
+
+    # Update: the image Micro-Manager shows, nothing taken
+    n = src.n
+    w.btn_update.click()
+    assert not w.btn_update.isEnabled() and not w.btn_snap.isEnabled()
+    wait_for(lambda: w.image[0, 0] == 500)
+    assert src.n == n and "image Micro-Manager's image: 672 x 512 px" in log() and w.btn_update.isEnabled()
+
+    # Reset: as Oriole opens; a frame still on its way is not shown
+    w.btn_live.click()
+    wait_for(lambda: src.n > n + 2)
+    w.slm_spot = {"x_px": 1.0, "y_px": 2.0, "diameter_um": 10.0}
+    w.redraw_spots()
+    w.btn_reset.click()
+    assert w.image is None and w.spots == [] and w.undo_stack == [] and w.slm_spot is None
+    assert not w.btn_live.isChecked() and w.view.image_item.image.shape == (512, 672, 3)
+    assert len(w.view.slm_item.points()) == 0 and not any(i.isVisible() for i in w.view.field_items)
+    assert "reset: no image, no spot" in log().splitlines()[-1]
+    wait_for(lambda: not w.feed.busy)
+    QtWidgets.QApplication.processEvents()
+    assert w.image is None and w.btn_snap.isEnabled() and w.btn_update.isEnabled()
+    w._on_click(10.0, 10.0, False)
+    assert "load an image first" in log() and not w.spots
 
     # Micro-Manager not there: said, live off
     src.error = "Micro-Manager not found on port 4827: start it"
