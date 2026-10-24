@@ -122,7 +122,8 @@ class MicroManager:
 
 class Feed(QtCore.QObject):
     """Images from Micro-Manager, in a thread of their own: one (``snap``: its Snap; ``show``: the image its window
-    shows, nothing taken), or one after the other while ``live``.
+    shows, nothing taken), or one after the other while ``live``. A Snap or Update asked while the thread is busy is
+    done right after (one waits at most): nothing asked is ever lost.
 
     Live switches Micro-Manager's own live mode on (when it is not already), then reads its frames: stopping it in
     Micro-Manager stops it here too, and stopping it here stops Micro-Manager's only if Oriole had switched it on.
@@ -131,7 +132,7 @@ class Feed(QtCore.QObject):
 
     frame = QtCore.pyqtSignal(object, str)          # image, how it came: "snap", "shown" or "live"
     note = QtCore.pyqtSignal(str, str)              # text, log level: settings, skipped frame, frozen camera
-    ended = QtCore.pyqtSignal(str, str)             # text, log level: the snap or live failed, or live stopped
+    ended = QtCore.pyqtSignal(str, str)             # text, log level: a snap or live failed, or live was stopped
 
     def __init__(self, source=None, parent=None):
         super().__init__(parent)
@@ -139,7 +140,7 @@ class Feed(QtCore.QObject):
         self.live = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._job = "snap"                          # what a thread started without live does: "snap" or "shown"
+        self._pending: str | None = None            # "snap" or "shown", done once the thread is free
         self._settings: tuple[str, float] | None = None
 
     @property
@@ -147,40 +148,43 @@ class Feed(QtCore.QObject):
         return self._thread is not None
 
     def snap(self):
-        self._start("snap")
+        self._ask("snap")
 
     def show(self):
-        self._start("shown")
+        self._ask("shown")
 
     def set_live(self, on: bool):
         self.live = on
         if on:
-            self._start()
+            self._ask(None)
 
     def close(self, wait_s: float = 2.0):
-        """Live off (Micro-Manager's too if Oriole switched it on), waiting for the thread a moment."""
-        self.live = False
-        thread = self._thread
+        """Live off (Micro-Manager's too if Oriole switched it on), nothing more asked, the thread waited for a
+        moment."""
+        with self._lock:
+            self.live, self._pending = False, None
+            thread = self._thread
         if thread is not None:
             thread.join(wait_s)
 
-    def _start(self, job: str = "snap"):
+    def _ask(self, job: str | None):
         with self._lock:
+            if job is not None:
+                self._pending = job
             if self._thread is None:
-                self._job = job
                 self._thread = threading.Thread(target=self._run, name="Micro-Manager", daemon=True)
                 self._thread.start()
 
-    def _end(self, text: str = "", level: str = "info") -> bool:
-        """The thread ends (said when ``text``) unless live was switched on again meanwhile (decided under the
-        lock: set_live(True) never finds a dying thread)."""
+    def _next_job(self) -> str | None:
+        """Live while it is on, else what was asked; None ends the thread (decided under the lock: a request never
+        finds a dying thread)."""
         with self._lock:
-            if self.live and not text:
-                return False
-            self.live, self._thread = False, None
-        if text:
-            self.ended.emit(text, level)
-        return True
+            if self.live:
+                return "live"
+            job, self._pending = self._pending, None
+            if job is None:
+                self._thread = None
+            return job
 
     def _report_settings(self) -> float:
         """Binning and exposure said when they change; the exposure (s)."""
@@ -195,17 +199,18 @@ class Feed(QtCore.QObject):
 
     def _run(self):
         try:
-            exposure_s = self._report_settings()
-            if not self.live:
-                image = self.source.snap() if self._job == "snap" else self.source.shown()
-                self.frame.emit(image, self._job)
-            while not self._end():                  # live (switched on during the snap, or again meanwhile)
-                reason = self._run_live(exposure_s)
-                if reason:
-                    self._end(*reason)
-                    return
+            while (job := self._next_job()) is not None:
+                exposure_s = self._report_settings()
+                if job != "live":
+                    image = self.source.snap() if job == "snap" else self.source.shown()
+                    self.frame.emit(image, job)
+                elif reason := self._run_live(exposure_s):
+                    self.live = False
+                    self.ended.emit(*reason)
         except CameraError as e:
-            self._end(str(e), "error")
+            with self._lock:
+                self.live, self._pending, self._thread = False, None, None
+            self.ended.emit(str(e), "error")
 
     def _run_live(self, exposure_s: float) -> tuple[str, str] | None:
         """Frames of Micro-Manager's live while ``live``; why it must end, if it must."""

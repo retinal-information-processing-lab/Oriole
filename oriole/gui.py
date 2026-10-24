@@ -42,7 +42,8 @@ HELP_HTML = f"""
 warning), or take it from Micro-Manager, which keeps the camera: <b>Snap</b> is Micro-Manager's own Snap (or its
 current live frame while its live runs), <b>Live</b> switches Micro-Manager's own live on and shows its frames
 (stopping it in Micro-Manager stops it here too), <b>Update</b> takes the image Micro-Manager's window shows (your last
-Snap there, or its live frame) without taking one. Oriole never changes the camera settings: set binning
+Snap there, or its live frame) without taking one. Snap and Update are always clickable: during Live they switch it
+off first and give a still image. Oriole never changes the camera settings: set binning
 {camera.EPI_BINNING} and {camera.EPI_EXPOSURE_MS:.0f} ms in Micro-Manager (the log says when they differ). Micro-Manager must
 be running with Tools → Options → <i>Run pycro-manager server on port {camera.PORT}</i> ticked.<br>
 <b>Left click</b> adds a spot, <b>drag</b> a spot to move it, <b>right click</b> on a spot removes it.
@@ -495,32 +496,25 @@ class MainWindow(QtWidgets.QMainWindow):
                  f"and everything extracted or generated from this image would be wrong.", "error")
 
     def snap(self):
-        self._ask_micro_manager(self.feed.snap)
+        self._still_image(self.feed.snap)
 
     def update_from_micro_manager(self):
-        self._ask_micro_manager(self.feed.show)
+        self._still_image(self.feed.show)
 
-    def _ask_micro_manager(self, request):
-        """One image from Micro-Manager (Snap or Update): both buttons wait for it."""
-        if self.feed.busy:
-            return
+    def _still_image(self, request):
+        """Snap or Update: a still image, so Oriole's Live goes off first (as Micro-Manager's Snap stops its live);
+        asked while Micro-Manager is busy, it comes right after."""
         self.frames_wanted = True
-        self._enable_one_image_buttons(False)
+        self.btn_live.setChecked(False)
         request()
-
-    def _enable_one_image_buttons(self, on: bool):
-        for btn in (self.btn_snap, self.btn_update):
-            btn.setEnabled(on)
 
     def _on_live(self, on: bool):
         if on:
             self.frames_wanted = True
         self.feed.set_live(on)
-        self._enable_one_image_buttons(not on and not self.feed.busy)
         self.log("Micro-Manager live: on" if on else "Micro-Manager live: off")
 
     def _on_frame(self, image, kind: str):
-        self._enable_one_image_buttons(not self.btn_live.isChecked())
         if not self.frames_wanted:                      # still on its way when Reset was pressed
             return
         source = {"snap": "Micro-Manager snap", "shown": "Micro-Manager's image"}.get(kind, "Micro-Manager live")
@@ -529,7 +523,6 @@ class MainWindow(QtWidgets.QMainWindow):
     def _on_camera_ended(self, message: str, level: str):
         self.log(message, level)
         self.btn_live.setChecked(False)
-        self._enable_one_image_buttons(True)
 
     def reset_image(self):
         """Back to how Oriole opens: no image (the camera target), no spot, no Undo, no SLM ring, Live off."""

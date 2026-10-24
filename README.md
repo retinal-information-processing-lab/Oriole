@@ -78,6 +78,10 @@ Oriole left the Hamamatsu sending black frames until Micro-Manager was restarted
     in the log.
 * **Update** takes the image Micro-Manager's Snap/Live window shows: your last Snap there, with your
   settings, or its live frame. Nothing is taken: the camera isn't touched.
+* **Snap and Update are always clickable.** During Live they switch Live off first, then give a
+  still image to click spots on, as Micro-Manager's own Snap stops its live. Pressed while
+  Micro-Manager is still busy with the previous one, they come right after (a double click gives
+  one).
 * **Camera settings:** Oriole never changes them. It logs them (binning, exposure) when they
   change, in yellow when they differ from the epi settings (2×2, 1000 ms): set those in
   Micro-Manager.

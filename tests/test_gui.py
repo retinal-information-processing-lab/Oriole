@@ -755,7 +755,7 @@ def test_micro_manager_snap_and_live(window, monkeypatch):
             return np.full((512, 672), 500, np.uint16)
     w.feed.source = src = Source()
     w.btn_snap.click()
-    assert not w.btn_snap.isEnabled()
+    assert w.btn_snap.isEnabled() and w.btn_update.isEnabled()        # never greyed out
     wait_for(lambda: w.image is not None)
     assert "image Micro-Manager snap: 672 x 512 px" in log() and w.btn_snap.isEnabled() and w.lbl_image_warning.isHidden()
     assert "Micro-Manager camera: binning 2x2, 100 ms (epi images: 2x2, 1000 ms; set them in Micro-Manager)" in log()
@@ -763,13 +763,23 @@ def test_micro_manager_snap_and_live(window, monkeypatch):
 
     # live: Micro-Manager's, its frames one after the other, logged once, the spots kept
     w.btn_live.click()
-    assert w.btn_live.isChecked() and not w.btn_snap.isEnabled() and "Micro-Manager live: on" in log()
+    assert w.btn_live.isChecked() and w.btn_snap.isEnabled() and "Micro-Manager live: on" in log()
     wait_for(lambda: src.n >= 5 and w.image[0, 0] >= 4)
     assert src.mm_live and log().count("image Micro-Manager live: 672 x 512 px") == 1 and w.spots == [(100.0, 100.0)]
     w.btn_live.click()
     wait_for(lambda: not w.feed.busy)
     QtWidgets.QApplication.processEvents()
     assert "Micro-Manager live: off" in log() and w.btn_snap.isEnabled() and not src.mm_live
+
+    # Snap during Live: Live off first, then the still image (as Micro-Manager's Snap stops its live)
+    w.btn_live.click()
+    wait_for(lambda: src.mm_live and w.feed.busy)
+    snaps = log().count("image Micro-Manager snap")
+    w.btn_snap.click()
+    assert not w.btn_live.isChecked()
+    wait_for(lambda: log().count("image Micro-Manager snap") == snaps + 1)
+    wait_for(lambda: not w.feed.busy)
+    assert not src.mm_live                              # Oriole had switched it on: off again
 
     # stopped in Micro-Manager: Oriole's Live goes off by itself
     w.btn_live.click()
@@ -781,7 +791,6 @@ def test_micro_manager_snap_and_live(window, monkeypatch):
     # Update: the image Micro-Manager shows, nothing taken
     n = src.n
     w.btn_update.click()
-    assert not w.btn_update.isEnabled() and not w.btn_snap.isEnabled()
     wait_for(lambda: w.image[0, 0] == 500)
     assert src.n == n and "image Micro-Manager's image: 672 x 512 px" in log() and w.btn_update.isEnabled()
 

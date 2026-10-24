@@ -228,7 +228,7 @@ def test_feed_snap_and_live_leave_micro_manager_as_found(qapp, monkeypatch):
     feed = Feed(src)
     rec = Recorder(feed)
     feed.snap()
-    feed.snap()                                         # a snap still running: not another one
+    feed.snap()                                         # a double click: one Snap (one request waits at most)
     wait_for(lambda: not feed.busy)
     QtWidgets.QApplication.processEvents()
     assert rec.frames == [1] and rec.kinds == ["snap"] and rec.notes == [
@@ -308,3 +308,44 @@ def test_feed_says_a_frozen_or_silent_camera(qapp, monkeypatch):
     wait_for(lambda: rec.ended)
     assert rec.ended == [("no frame from Micro-Manager's live within 0 s: Live off", "error")] and src.calls == [
         True, False]
+
+
+def test_feed_request_during_a_snap_comes_right_after(qapp):
+    import threading
+    src = FakeSource()
+    release = threading.Event()
+    snap = src.snap
+
+    def slow_snap():                                    # a 1000 ms Snap, held until released
+        release.wait(5)
+        return snap()
+    src.snap = slow_snap
+    feed = Feed(src)
+    rec = Recorder(feed)
+    feed.snap()
+    wait_for(lambda: feed._pending is None and feed.busy)  # the first Snap is running
+    feed.snap()                                         # pressed meanwhile: not lost
+    release.set()
+    wait_for(lambda: not feed.busy)
+    QtWidgets.QApplication.processEvents()
+    assert rec.frames == [1, 2] and rec.kinds == ["snap", "snap"]
+
+
+def test_feed_snap_asked_during_live_comes_once_live_is_off(qapp, monkeypatch):
+    monkeypatch.setattr(camera, "LIVE_PERIOD_S", 0.002)
+    src = FakeSource()
+    feed = Feed(src)
+    rec = Recorder(feed)
+    feed.set_live(True)
+    wait_for(lambda: len(rec.frames) >= 2)
+    feed.set_live(False)                                # what the window does on Snap: Live off, then the Snap
+    feed.snap()
+    wait_for(lambda: not feed.busy)
+    QtWidgets.QApplication.processEvents()
+    assert rec.kinds[-1] == "snap" and set(rec.kinds[:-1]) == {"live"} and src.calls == [True, False]
+    feed.set_live(True)                                 # a request never finds a dying thread
+    feed.set_live(False)
+    feed.show()
+    wait_for(lambda: not feed.busy)
+    QtWidgets.QApplication.processEvents()
+    assert rec.kinds[-1] == "shown" and not rec.ended
