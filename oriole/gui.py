@@ -25,11 +25,11 @@ from .calibration import EPI_SIZE
 from .config import DEFAULT_CONFIG_PATH, Config
 from .images import load_gray
 from .shutter import Shutter, ShutterError
-from .theme import (ACCENT, ACTION_STYLE, BLOCKED_STYLE, BTN, DIM, HOLO_COLOUR, IMAGE_COLOUR, INNER_CIRCLE,
+from .theme import (ACTION_STYLE, BLOCKED_STYLE, BTN, DIM, HOLO_COLOUR, IMAGE_COLOUR, INNER_CIRCLE,
                     LOG_COLOURS, NO_GO, OUTER_CIRCLE, PANEL_BG, SLM_RING, STOP_STYLE, TEXT, VISUAL_COLOUR, WARN,
                     apply_dark_theme)
-from .widgets import (CalibrationBox, FolderEdit, ImageView, action_button, button, card, icon_button, spin_box,
-                      title_label)
+from .widgets import (CalibrationBox, FolderEdit, ImageView, action_button, button, card, help_button, icon_button,
+                      spin_box, title_label)
 
 LOG_PATH = DEFAULT_CONFIG_PATH.parent / "oriole.log"   # tracebacks of internal errors
 AUTOLOAD_HINT = 'check that "Tools → Script engine → auto load (script folder)" is selected in Wavefront'
@@ -56,7 +56,8 @@ new frame numbers).</p>
 <h3>Holo · SLM</h3>
 <p><b>Wavefront folder</b>: the Wavefront IV install (<code>wfdIV.exe</code>); scripts go to its
 <code>script\\</code>, masks are read from its <code>GeneratedPhasemasks\\</code>; 🧹 sweeps a folder clean, 📂 opens
-the phase mask folder in the file explorer. After a new install (its licence expired), pick its folder.<br>
+the phase mask folder in the file explorer. After a new install (its licence expired: the <b>?</b> next to it
+says how), pick its folder.<br>
 Under it, Wavefront's state. <b>Start</b> starts it from that folder in script mode (set in its settings,
 <code>%APPDATA%\\wfdIV\\wfdIV.ini</code>, with the folder it saves masks in); Oriole does so itself when it opens
 (<b>start Wavefront with Oriole</b>). <b>Check</b> sends it a script that does nothing: taken, Wavefront is in script
@@ -85,6 +86,37 @@ Wavefront).<br>
 <span style="color:{SLM_RING}">purple SLM ring</span> on the image (where it was clicked, from
 <code>Pattern_spots.json</code>); <b>Open</b> / <b>Close</b> the shutter (close it before a Plerion protocol).</p>
 <p>Everything typed is saved in <code>~/.oriole/config.json</code>.</p>
+"""
+
+
+def reinstall_html(wfd_root: str) -> str:
+    """How to install Wavefront IV again when its licence expired: the procedure on the desktop, step by step."""
+    new = Path(wfd_root).parent / f"wfdIV_{_dt.date.today():%Y%m%d}"
+
+    def link(path: Path, text: str) -> str:
+        if not path.exists():
+            return f"{text} (not found on this PC: {html.escape(str(path))})"
+        return f'<a href="{QtCore.QUrl.fromLocalFile(str(path)).toString()}">{text}</a>'
+    return f"""
+<h3>When Wavefront IV breaks</h3>
+<p>Its licence expires now and then: Wavefront does not start any more (<i>Failed to launch WfdIVCore, error code
+7536725</i>), or its <code>wfdIVCore.dll</code> is left empty (Oriole says so in red). Install it again in a new
+folder, as in {link(wavefront.LICENCE_PDF, "the procedure on the desktop")}:</p>
+<ol>
+<li><b>Extract the zip</b> <code>{html.escape(wavefront.INSTALL_ZIP.name)}</code>
+({link(wavefront.INSTALL_ZIP.parent, "its folder")}), then rename the <code>wfdIV</code> folder it holds after
+today, next to the others: <code>{html.escape(str(new))}</code>.</li>
+<li><b>Make the folders</b> <code>script</code> and <code>GeneratedPhasemasks</code> in it (the zip has neither).</li>
+<li><b>Make the log file</b>: double-click <code>log.bat</code> in it. It writes the file <code>log</code> (a small box
+says "log": OK).</li>
+<li><b>Licence</b>: drag the file <code>log</code> onto <code>wfdIV.exe</code>. A window asks for a user and a
+password: click in the password box, then press <b>Ctrl</b>, <b>A</b> and <b>R</b> together. Wavefront starts:
+close it (it asks to confirm), as it still saves its masks in the old folder.</li>
+<li><b>In Oriole</b>: pick the new folder as the Wavefront folder (<b>…</b>), then press <b>Start</b>. Oriole starts
+Wavefront from it in script mode, saving the masks in its <code>GeneratedPhasemasks</code>.</li>
+</ol>
+<p>Still not starting: Vincent De Sars (Vincent.de-sars@inserm.fr), as the procedure says. The masks made before stay
+in the old folder's <code>GeneratedPhasemasks</code>.</p>
 """
 
 
@@ -129,7 +161,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spots: list[tuple[float, float]] = []      # camera px
         self.undo_stack: list[list[tuple[float, float]]] = []
         self.dragging: int | None = None                # spot being dragged
-        self.help_dialog: QtWidgets.QDialog | None = None
+        self.dialogs: dict[str, QtWidgets.QDialog] = {}   # help pages, by title
         self.last_spot_bin: Path | None = None
         self.slm_spot: dict | None = None               # where the mask loaded on the SLM was clicked
         self.shutter = Shutter(config.nidaq_device, config.shutter_ao)
@@ -231,10 +263,7 @@ class MainWindow(QtWidgets.QMainWindow):
         bar.addStretch(1)
         self.lbl_count = QtWidgets.QLabel()
         bar.addWidget(self.lbl_count)
-        self.btn_help = button("?", self.show_help, "Help",
-                               f"QPushButton {{ background: {ACCENT}; color: white; border-radius: 14px; padding: 0;"
-                               f" font: bold 12pt 'Segoe UI'; }} QPushButton:hover {{ background: #3D82BF; }}")
-        self.btn_help.setFixedSize(28, 28)
+        self.btn_help = help_button(self.show_help, "Help")
         bar.addWidget(self.btn_help)
         col.addLayout(bar)
         self.view = ImageView()
@@ -253,7 +282,13 @@ class MainWindow(QtWidgets.QMainWindow):
         col.addWidget(title_label("HOLO · SLM", HOLO_COLOUR))
         setup = QtWidgets.QGroupBox("Settings")
         box = QtWidgets.QVBoxLayout(setup)
-        box.addWidget(QtWidgets.QLabel("Wavefront folder"))
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(QtWidgets.QLabel("Wavefront folder"))
+        row.addStretch(1)
+        self.btn_reinstall_help = help_button(self.show_reinstall_help, "Wavefront broken (licence expired)? How to "
+                                                                        "install it again", 20)
+        row.addWidget(self.btn_reinstall_help)
+        box.addLayout(row)
         self.edit_wfd_root = FolderEdit(self.config.wfd_root)
         self.edit_wfd_root.setToolTip("the Wavefront IV install: wfdIV.exe, script\\ and GeneratedPhasemasks\\")
         self.edit_wfd_root.changed.connect(self._on_wavefront_root)
@@ -351,18 +386,27 @@ class MainWindow(QtWidgets.QMainWindow):
             edit.setToolTip(folder)
 
     def show_help(self):
-        if self.help_dialog is None:
-            self.help_dialog = QtWidgets.QDialog(self)
-            self.help_dialog.setWindowTitle("Oriole help")
-            self.help_dialog.resize(620, 640)
-            layout = QtWidgets.QVBoxLayout(self.help_dialog)
+        self._show_page("Oriole help", HELP_HTML, (620, 640))
+
+    def show_reinstall_help(self):
+        self._show_page("Installing Wavefront IV again", reinstall_html(self.config.wfd_root), (620, 520))
+
+    def _show_page(self, title: str, page: str, size: tuple[int, int]):
+        """A help page in a window of its own (kept open beside the main one); its links open in Windows."""
+        dialog = self.dialogs.get(title)
+        if dialog is None:
+            dialog = self.dialogs[title] = QtWidgets.QDialog(self)
+            dialog.setWindowTitle(title)
+            dialog.resize(*size)
+            layout = QtWidgets.QVBoxLayout(dialog)
             text = QtWidgets.QTextBrowser()
-            text.setHtml(HELP_HTML)
+            text.setOpenExternalLinks(True)
             text.setStyleSheet(f"background: {PANEL_BG}; color: {TEXT}; border: none; font: 10pt 'Segoe UI';")
             layout.addWidget(text)
-            layout.addWidget(button("Close", self.help_dialog.close))
-        self.help_dialog.show()
-        self.help_dialog.raise_()
+            layout.addWidget(button("Close", dialog.close))
+        dialog.findChild(QtWidgets.QTextBrowser).setHtml(page)
+        dialog.show()
+        dialog.raise_()
 
     def log(self, text: str, level: str = "info"):
         big = "; font-size: 14pt; font-weight: bold" if level == "alarm" else ""
@@ -649,10 +693,14 @@ class MainWindow(QtWidgets.QMainWindow):
         folder = (core[1] or Path(self.config.wfd_root)) if core else None     # its folder unknown: taken as ours
         ready = core is not None and wavefront.window_open(core[0])
         if ready and not self.wf_ready:                 # just ready (or seen for the first time)
+            saved_in = wavefront.read_ini("mainSettings", "rootPath")
             if not _same_folder(folder, self.config.wfd_root):
                 self.log(f"Wavefront IV runs from {folder}, not from the Wavefront folder {self.config.wfd_root}: it "
                          f"reads its scripts elsewhere. Close it and press Start, or pick {folder} as the Wavefront "
                          f"folder", "error")
+            elif saved_in and not _same_folder(saved_in, self.config.wfd_output_dir):   # started by hand
+                self.log(f"Wavefront IV saves its masks in {saved_in}, not in {self.config.wfd_output_dir}: close it "
+                         f"and press Start (Oriole sets where it saves them)", "error")
             elif self.wf_mode is None:
                 self.wf_check.start()
         if core is None:

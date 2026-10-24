@@ -54,6 +54,15 @@ def action_button(text: str, slot) -> QtWidgets.QPushButton:
     return btn
 
 
+def help_button(slot, tip: str, size: int = 28) -> QtWidgets.QPushButton:
+    """A round blue "?" opening a help page."""
+    btn = button("?", slot, tip, f"QPushButton {{ background: {ACCENT}; color: white; border-radius: {size // 2}px;"
+                                 f" padding: 0; font: bold {size * 3 // 7}pt 'Segoe UI'; }}"
+                                 f" QPushButton:hover {{ background: #3D82BF; }}")
+    btn.setFixedSize(size, size)
+    return btn
+
+
 def icon_button(icon: str, slot, tip: str) -> QtWidgets.QPushButton:
     btn = button(icon, slot, tip, "padding: 2px 0; font: 12pt 'Segoe UI Emoji';")
     btn.setFixedWidth(30)

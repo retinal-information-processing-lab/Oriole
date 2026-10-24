@@ -16,6 +16,8 @@ def _install(folder: Path, core=b"core") -> Path:
     folder.mkdir(parents=True)
     (folder / "wfdIV.exe").write_bytes(b"launcher")
     (folder / "wfdIVCore.dll").write_bytes(core)
+    for name in ("script", "GeneratedPhasemasks"):
+        (folder / name).mkdir()
     return folder
 
 
@@ -28,6 +30,13 @@ def test_install_problems_and_other_installs(tmp_path):
     assert "wfdIVCore.dll is missing or empty" in install_problem(expired)
     assert "Wavefront IV Errorcode 7536725.pdf" in install_problem(expired)
     assert install_problem(bare) == f"no wfdIV.exe in {bare}"
+    fresh = tmp_path / "wfdIV_fresh"                    # just extracted from the zip: no script, no mask folder
+    fresh.mkdir()
+    (fresh / "wfdIV.exe").write_bytes(b"launcher")
+    (fresh / "wfdIVCore.dll").write_bytes(b"core")
+    assert install_problem(fresh) == f"no script or GeneratedPhasemasks folder in {fresh}: make them"
+    (fresh / "script").mkdir()
+    assert install_problem(fresh) == f"no GeneratedPhasemasks folder in {fresh}: make it"
     assert other_installs(expired) == [good] and other_installs(good) == []
 
 

@@ -237,8 +237,18 @@ def test_fixed_view_drag_spots_and_help(window):
     w._on_drag(-50.0, 900.0, 2)                                         # kept inside the image
     assert w.spots[1][0] == 0.0 and w.spots[1][1] < 512
     w.btn_help.click()
-    assert w.help_dialog.isVisible()
-    assert "Pattern1" in w.help_dialog.findChild(QtWidgets.QTextBrowser).toPlainText()
+    help_page = w.dialogs["Oriole help"]
+    assert help_page.isVisible() and "Pattern1" in help_page.findChild(QtWidgets.QTextBrowser).toPlainText()
+
+    # the ? next to the Wavefront folder: how to install Wavefront again, today's folder name in it
+    w.btn_reinstall_help.click()
+    page = w.dialogs["Installing Wavefront IV again"].findChild(QtWidgets.QTextBrowser).toPlainText()
+    new = Path(w.config.wfd_root).parent / f"wfdIV_{datetime.date.today():%Y%m%d}"
+    for step in ("Extract the zip", "Make the folders script and GeneratedPhasemasks", "double-click log.bat",
+                 "press Ctrl, A and R together", "pick the new folder as the Wavefront folder", str(new)):
+        assert step in page
+    w.show_help()                                       # each page in its own window
+    assert len(w.dialogs) == 2
 
 
 def _take_without_saving(w):
@@ -647,7 +657,7 @@ def test_wavefront_started_checked_and_watched(window, tmp_path, monkeypatch):
     procs.update(launcher=(1, root), core=(2, root))
     w._watch_wavefront()
     assert w.lbl_wavefront.text() == "Wavefront: running" and w.btn_wavefront.text() == "Check"
-    assert w.wf_check.isActive()
+    assert w.wf_check.isActive() and "saves its masks in" not in log()
     w.wf_check.stop()
     w._check_when_idle()                                # what the 2 s timer does
     script = Path(w.config.wfd_script_dir) / "test.js"
@@ -680,6 +690,15 @@ def test_wavefront_started_checked_and_watched(window, tmp_path, monkeypatch):
     assert "another install" in w.lbl_wavefront.text() and not w.wf_check.isActive()
     w.generate()
     assert log().count(f"Wavefront IV runs from {other}") == 2 and not w.jobs
+
+    # started by hand (end of a reinstall): it still saves its masks in the old install
+    procs.clear()
+    w._watch_wavefront()
+    procs.update(core=(2, root))
+    wavefront.write_ini({("mainSettings", "rootPath"): str(other / "GeneratedPhasemasks")}, ini)
+    w._watch_wavefront()
+    assert (f"Wavefront IV saves its masks in {other / 'GeneratedPhasemasks'}, not in {w.config.wfd_output_dir}: "
+            f"close it and press Start") in log()
 
     # started but its program never runs: the licence
     procs.clear()

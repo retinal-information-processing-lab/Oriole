@@ -21,7 +21,10 @@ LAUNCHER = "wfdIV.exe"
 CORE = "wfdIVCore.dll"
 WINDOW_TITLE = "Wavefront Designer IV"      # its main window, open once it is ready for scripts
 INI_PATH = Path(os.environ.get("APPDATA", Path.home())) / "wfdIV" / "wfdIV.ini"
+INSTALL_ZIP = Path.home() / "Documents" / "wfdIV.ifta2D-181220.00.zip"         # what an install is made from
+LICENCE_PDF = Path.home() / "Desktop" / "Wavefront IV Errorcode 7536725.pdf"   # the lab's reinstall procedure
 LICENCE_HELP = 'the licence expired? Its fix is in "Wavefront IV Errorcode 7536725.pdf" on the desktop'
+FOLDERS = ("script", "GeneratedPhasemasks")     # made by hand in a new install: the zip has neither
 SUPPORTED = sys.platform == "win32"
 
 
@@ -33,6 +36,9 @@ def install_problem(folder) -> str | None:
     core = folder / CORE
     if not core.is_file() or core.stat().st_size == 0:
         return f"{CORE} is missing or empty in {folder}: {LICENCE_HELP}"
+    missing = [name for name in FOLDERS if not (folder / name).is_dir()]
+    if missing:
+        return f"no {' or '.join(missing)} folder in {folder}: make {'it' if len(missing) == 1 else 'them'}"
     return None
 
 

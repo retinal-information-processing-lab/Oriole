@@ -121,7 +121,12 @@ folder)* selected): one mask per spot, saved by Wavefront as `Pattern1_000.algoP
 (`wfdIV.exe`, a launcher that runs the program itself, `wfdIVCore.dll`). The scripts go to its
 `script\` and the masks are read from its `GeneratedPhasemasks\`; both paths are shown below it.
 Wavefront's licence expires now and then (its fix: *Wavefront IV Errorcode 7536725.pdf* on the
-desktop), and it is then installed again in a new folder: pick that one.
+desktop), and it is then installed again in a new folder: pick that one. The **?** next to
+*Wavefront folder* gives the procedure step by step: extract the zip again
+(`Documents\wfdIV.ifta2D-181220.00.zip`) into `wfdIV_<date>`, make its `script` and
+`GeneratedPhasemasks` folders, double-click `log.bat` (it writes the file `log`), drag `log` onto
+`wfdIV.exe`, click in the password box and press Ctrl, A and R together, close Wavefront, then pick
+the new folder in Oriole and press Start.
 The 🧹 next to the script folder sweeps it clean at once, the one next to the phase mask folder
 after a confirmation (it lists how many files and their dates). 📂 opens the phase mask folder in
 the file explorer.
@@ -136,8 +141,10 @@ line under the folder says Wavefront's state (checked every second): not running
 running, *script mode ✓*, *NOT in script mode*, or *another install* (it runs from another folder,
 where it reads its scripts: an error in the log, Generate and Load refused). Once it is ready (its
 window open) Oriole sends it a script that does nothing (**Check** does it again): taken, it is in
-script mode. A core that is empty or missing (licence), or a Wavefront that does not start within
-20 s, is said in the log, with the other installs next to it. Closing Wavefront asks to confirm:
+script mode. A core that is empty or missing (licence), a missing `script` or `GeneratedPhasemasks`
+folder, or a Wavefront that does not start within 20 s, is said in the log, with the other installs
+next to it. A Wavefront started by hand that saves its masks elsewhere (`rootPath`, e.g. right
+after a reinstall) is said too: close it and press Start. Closing Wavefront asks to confirm:
 Oriole never closes it (it keeps running when Oriole closes). Generate and Load say at once when
 Wavefront is not running.
 
