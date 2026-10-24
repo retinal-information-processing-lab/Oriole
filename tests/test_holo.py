@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 
 from oriole.calibration import HOLO_DEFAULT
-from oriole.holo import (WavefrontBusy, WavefrontClient, available_masks, date_range, drawn_spot, empty_folder,
-                         files_in, load_script, mask_name, mask_png, mask_saved, mask_script,
-                         off_spot, old_masks, recorded_spot, write_spot_record)
+from oriole.holo import (available_masks, drawn_spot, file_dates, files_in, load_script, mask_name, mask_png,
+                         mask_saved, mask_script, off_spot, recorded_spot, script_pending, send_script, sweep,
+                         write_spot_record)
 
 DHGUI_SCRIPT = Path(__file__).resolve().parents[1] / "DHgui_20261022" / "scripts" / "test.js"
 DATA = Path(__file__).resolve().parent / "data"
@@ -49,36 +49,32 @@ def test_drawn_spot(tmp_path):
     assert drawn_spot(tmp_path, "Pattern2", 10) is None                                         # nothing to check
 
 
-def test_client_drops_script_then_trigger(tmp_path):
-    client = WavefrontClient(tmp_path)
-    assert client.done()
-    client.submit("cleanAllBlob();\n")
+def test_script_dropped_then_trigger(tmp_path):
+    assert not script_pending(tmp_path)
+    send_script(tmp_path, "cleanAllBlob();\n")
     assert (tmp_path / "test.js").read_text() == "cleanAllBlob();\n"
     assert (tmp_path / "zdone.js").exists() and not (tmp_path / "test.js.part").exists()
-    assert client.busy
-    with pytest.raises(WavefrontBusy, match="auto-load"):
-        client.submit("x")
+    assert script_pending(tmp_path)
+    with pytest.raises(RuntimeError, match="auto-load"):
+        send_script(tmp_path, "x")
     (tmp_path / "test.js").unlink()             # what Wavefront does once it ran the script
-    assert client.done()
+    assert not script_pending(tmp_path)
     (tmp_path / "test.js").write_text("left behind")
     (tmp_path / "sub").mkdir()
-    assert client.purge() == ["test.js", "zdone.js"] and not client.busy and (tmp_path / "sub").is_dir()
-    assert empty_folder(tmp_path / "missing") == []
+    assert sweep(tmp_path) == (["test.js", "zdone.js"], []) and (tmp_path / "sub").is_dir()
+    assert sweep(tmp_path / "missing") == ([], [])
     with pytest.raises(FileNotFoundError):
-        WavefrontClient(tmp_path / "missing").submit("x")
+        send_script(tmp_path / "missing", "x")
 
 
-def test_old_masks_dates_and_record(tmp_path):
+def test_masks_dates_and_record(tmp_path):
     for n in ["Pattern1_000.algoPhp.png", "Pattern1_000.xml", "Pattern12_000.algoPhp.png", "Pattern2_000.slm.png",
               "PatternAll_000.algoPhp.png", "Pattern_spots.json", "Pattern3.txt"]:
         (tmp_path / n).touch()
     t = datetime.datetime(2026, 10, 20, 12).timestamp()
     os.utime(tmp_path / "Pattern1_000.xml", (t, t))
-    old = old_masks(tmp_path)
-    assert [p.name for p in old] == ["Pattern1_000.algoPhp.png", "Pattern1_000.xml", "Pattern2_000.slm.png",
-                                     "Pattern12_000.algoPhp.png"]
-    assert date_range(old) == (datetime.date(2026, 10, 20), datetime.date.today())
-    assert date_range([]) is None and old_masks(tmp_path / "missing") == []
+    assert file_dates(files_in(tmp_path)) == f"2026 10 20 – {datetime.date.today():%Y %m %d}"
+    assert file_dates([tmp_path / "Pattern1_000.xml"]) == "2026 10 20" and file_dates([]) == ""
     assert available_masks(tmp_path) == [1, 12] and available_masks(tmp_path / "missing") == []
     assert mask_name(4) == "Pattern4"                       # DHgui: 'Pattern' int2str(num_frame)
     assert mask_png(tmp_path, mask_name(4)) == tmp_path / "Pattern4_000.algoPhp.png"

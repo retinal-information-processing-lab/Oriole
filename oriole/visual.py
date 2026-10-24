@@ -47,13 +47,13 @@ def bin_name(n_spots: int, directory=None, date: _dt.date | None = None) -> str:
     return name
 
 
-def _write_bin(out_bin: Path, xsize: int, ysize: int, rig: int, n_total: int, write):
+def _write_bin(out_bin: Path, xsize: int, ysize: int, n_total: int, write):
     """Write through a .tmp then rename, so a failed write never leaves a partial bin."""
     if n_total > MAX_FRAMES:
         raise ValueError(f"the bin would have {n_total} frames, more than {MAX_FRAMES}")
     tmp = out_bin.with_suffix(out_bin.suffix + ".tmp")
     try:
-        with BinFile(str(tmp), xsize, ysize, rig_id=rig, nb_images=n_total, mode="w") as bf:
+        with BinFile(str(tmp), xsize, ysize, rig_id=RIG_ID, nb_images=n_total, mode="w") as bf:
             write(bf)
             if bf.get_frame_nb() + 1 != n_total:
                 raise ValueError(f"wrote {bf.get_frame_nb() + 1} frames, header says {n_total}")
@@ -79,7 +79,7 @@ def write_spot_bin(directory, spots_px, image_shape, diameter_um: float, cal: Ca
             bf.append(m.astype(float))
             bf.append(1.0 - m)
 
-    _write_bin(out, w, h, RIG_ID, 2 * len(masks), write)
+    _write_bin(out, w, h, 2 * len(masks), write)
     info = {"bin": out.name, "created": _dt.datetime.now().isoformat(timespec="seconds"),
             "rig_id": RIG_ID, "dmd_shape": [h, w], "dmd_pixel_um": config.pixel_size_um,
             "diameter_um": diameter_um, "calibration": cal.to_dict(), "image_shape": list(image_shape[:2]),
@@ -121,7 +121,7 @@ def merge_bin(linked_bin, spot_bin, out_bin) -> dict:
         _copy_frames(linked_bin, h0, bf)
         _copy_frames(spot_bin, h1, bf)
 
-    _write_bin(out_bin, h0["xsize"], h0["ysize"], RIG_ID, n0 + h1["nb_images"], write)
+    _write_bin(out_bin, h0["xsize"], h0["ysize"], n0 + h1["nb_images"], write)
     side = Path(str(spot_bin) + ".json")
     spots = json.loads(side.read_text())["spots"] if side.exists() else []
     mapping = {"output_bin": str(out_bin), "linked_bin": str(linked_bin), "spot_bin": str(spot_bin),

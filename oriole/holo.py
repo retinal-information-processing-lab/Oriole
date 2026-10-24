@@ -84,7 +84,7 @@ def field_outline() -> list[tuple[str, np.ndarray]]:
             ("cross", np.array([(-c, 0), (c, 0)])), ("cross", np.array([(0, -c), (0, c)]))]
 
 
-# ----------------------------------------------------------------------------- mask files
+# ----------------------------------------------------------------------------- files
 def mask_png(output_dir, profile: str) -> Path:
     return Path(output_dir) / f"{profile}{MASK_SUFFIX}"
 
@@ -93,21 +93,34 @@ def natural_key(path) -> list:
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", Path(path).name)]
 
 
-def old_masks(output_dir) -> list[Path]:
-    """Every file Wavefront wrote for profiles Pattern<n> (png, xml...): what Plerion counts as spots."""
-    folder = Path(output_dir)
-    if not folder.is_dir():
-        return []
-    rx = re.compile(rf"^{PREFIX}\d+_000\.")
-    return sorted((p for p in folder.iterdir() if p.is_file() and rx.match(p.name)), key=natural_key)
+def files_in(folder) -> list[Path]:
+    """The files (not the sub-folders) of ``folder``, in natural order."""
+    folder = Path(folder)
+    return sorted((p for p in folder.iterdir() if p.is_file()), key=natural_key) if folder.is_dir() else []
 
 
 def available_masks(output_dir) -> list[int]:
     """Numbers n of the Pattern<n>_000.algoPhp.png masks in the folder, in order."""
     rx = re.compile(rf"^{PREFIX}(\d+){re.escape(MASK_SUFFIX)}$")
-    folder = Path(output_dir)
-    found = (rx.match(p.name) for p in folder.iterdir()) if folder.is_dir() else ()
-    return sorted(int(m.group(1)) for m in found if m)
+    return sorted(int(m.group(1)) for p in files_in(output_dir) if (m := rx.match(p.name)))
+
+
+def sweep(*folders) -> tuple[list[str], list[Path]]:
+    """Delete the files (not the sub-folders) of ``folders``: the names deleted, and the files left (in use...)."""
+    swept = []
+    for p in [p for folder in folders for p in files_in(folder)]:
+        try:
+            p.unlink()
+            swept.append(p.name)
+        except OSError:
+            pass
+    return swept, [p for folder in folders for p in files_in(folder)]
+
+
+def file_dates(paths) -> str:
+    """Modification dates of ``paths``: 'YYYY MM DD', or 'YYYY MM DD – YYYY MM DD' when they differ."""
+    dates = sorted(f"{_dt.date.fromtimestamp(Path(p).stat().st_mtime):%Y %m %d}" for p in paths)
+    return "" if not dates else dates[0] if dates[0] == dates[-1] else f"{dates[0]} – {dates[-1]}"
 
 
 def mask_saved(png, since: float) -> bool:
@@ -143,31 +156,6 @@ def off_spot(drawn, x_um: float, y_um: float, diameter_um: float) -> bool:
     return not np.hypot(drawn[0] - x_um, drawn[1] - y_um) <= max(3.0, diameter_um / 2)
 
 
-def files_in(folder) -> list[Path]:
-    """The files (not the sub-folders) of ``folder``, in natural order."""
-    folder = Path(folder)
-    return sorted((p for p in folder.iterdir() if p.is_file()), key=natural_key) if folder.is_dir() else []
-
-
-def empty_folder(folder) -> list[str]:
-    """Delete the files (not the sub-folders) of ``folder``; returns their names."""
-    folder = Path(folder)
-    if not folder.is_dir():
-        return []
-    removed = []
-    for p in sorted(folder.iterdir(), key=natural_key):
-        if p.is_file():
-            p.unlink()
-            removed.append(p.name)
-    return removed
-
-
-def date_range(paths) -> tuple[_dt.date, _dt.date] | None:
-    """Oldest and newest modification date of ``paths``."""
-    dates = [_dt.date.fromtimestamp(Path(p).stat().st_mtime) for p in paths]
-    return (min(dates), max(dates)) if dates else None
-
-
 def write_spot_record(output_dir, spots_px, spots_um, diameter_um: float, cal: Calibration) -> Path:
     """``Pattern_spots.json`` next to the masks: which spot each Pattern<n> mask is."""
     path = Path(output_dir) / RECORD_NAME
@@ -196,41 +184,21 @@ def recorded_spot(output_dir, n: int) -> dict | None:
         return None
 
 
-# ----------------------------------------------------------------------------- client
-class WavefrontBusy(RuntimeError):
-    pass
+# ----------------------------------------------------------------------------- script folder
+def script_pending(script_dir) -> bool:
+    """A script is waiting in the folder: Wavefront has not taken it yet."""
+    return (Path(script_dir) / SCRIPT_NAME).exists()
 
 
-class WavefrontClient:
-    """Drop scripts into the Wavefront script folder; ``done()`` once Wavefront took the last one."""
-
-    def __init__(self, script_dir):
-        self.script_dir = Path(script_dir)
-
-    @property
-    def script_path(self) -> Path:
-        return self.script_dir / SCRIPT_NAME
-
-    @property
-    def busy(self) -> bool:
-        return self.script_path.exists()
-
-    def done(self) -> bool:
-        return not self.busy
-
-    def purge(self) -> list[str]:
-        """Delete every file left in the script folder (Wavefront sometimes leaves a script behind)."""
-        return empty_folder(self.script_dir)
-
-    def submit(self, js: str):
-        if not self.script_dir.is_dir():
-            raise FileNotFoundError(f"Wavefront script folder not found: {self.script_dir}")
-        if self.busy:
-            raise WavefrontBusy(f"{self.script_path} is still pending: is Wavefront IV running "
-                                f"with script auto-load on?")
-        part = self.script_dir / (SCRIPT_NAME + ".part")
-        with open(part, "w") as f:          # written whole then renamed: Wavefront never reads half a script
-            f.write(js)
-        os.replace(part, self.script_path)
-        with open(self.script_dir / TRIGGER_NAME, "w"):
-            pass
+def send_script(script_dir, js: str):
+    """Drop ``js`` as test.js, then the empty zdone.js that makes Wavefront run it."""
+    script_dir = Path(script_dir)
+    if not script_dir.is_dir():
+        raise FileNotFoundError(f"Wavefront script folder not found: {script_dir}")
+    if script_pending(script_dir):
+        raise RuntimeError(f"{script_dir / SCRIPT_NAME} is still pending: is Wavefront IV running with script "
+                           f"auto-load on?")
+    part = script_dir / (SCRIPT_NAME + ".part")
+    part.write_text(js)                 # written whole then renamed: Wavefront never reads half a script
+    os.replace(part, script_dir / SCRIPT_NAME)
+    (script_dir / TRIGGER_NAME).write_text("")

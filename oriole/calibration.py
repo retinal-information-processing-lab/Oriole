@@ -11,6 +11,8 @@ from dataclasses import asdict, dataclass
 
 import numpy as np
 
+EPI_SIZE = (672, 512)       # width, height of the epi camera images (binned 2x2) both calibrations are made for
+
 
 @dataclass
 class Calibration:

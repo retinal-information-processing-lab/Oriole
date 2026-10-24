@@ -133,14 +133,16 @@ on exit: close it before starting a Plerion protocol.
 
 ```
 oriole/
-  calibration.py  the 5-number manual calibration
+  calibration.py  the 5-number manual calibration, the expected epi image size
   visual.py       spots -> DMD discs, spot bin + json, merge into a linked bin
-  holo.py         Wavefront scripts, file-drop client, old masks, spot record
+  holo.py         Wavefront scripts and field, script drop, mask checks, folder sweeps, spot record
   shutter.py      NI-DAQ analog-output shutter
   binfile.py      lab bin reader / writer (numpy 2)
   images.py       image loading (grey)
   config.py       settings + calibrations (~/.oriole/config.json)
-  gui.py          the window (dark theme from Plerion)
+  theme.py        colours and styles (dark theme from Plerion)
+  widgets.py      the image view (spots, SLM ring, Wavefront's field), calibration box, small factories
+  gui.py          the window: settings, spots, extract / merge, Wavefront jobs (generate, Load), shutter
 tests/            pytest (Wavefront and NI-DAQ simulated)
 ```
 
