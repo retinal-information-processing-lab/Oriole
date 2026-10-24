@@ -1,8 +1,10 @@
 """Epi images from the running Micro-Manager, through its pycro-manager server.
 
-Micro-Manager keeps the camera; Oriole asks it, over its server (Tools → Options → "Run pycro-manager server on port
-4827", ticked once), for a snap at the rig's epi settings, 1000 ms exposure and binning 2x2, or, while Micro-Manager's
-own live mode runs, for its latest frame. Only ``pyjavaz`` (with ``pyzmq``) is needed, imported when first used.
+Micro-Manager keeps the camera and Oriole never commands it directly: it asks Micro-Manager, over its server
+(Tools → Options → "Run pycro-manager server on port 4827", ticked once), for Micro-Manager's own Snap, or switches
+Micro-Manager's own Live on and reads its frames. Oriole never changes the camera settings either (changing the
+binning from Oriole left the rig's Hamamatsu sending black frames until Micro-Manager was restarted): it reports them,
+the epi settings being binning 2x2 and 1000 ms. Only ``pyjavaz`` (with ``pyzmq``) is needed, imported when first used.
 """
 from __future__ import annotations
 
@@ -14,10 +16,12 @@ import numpy as np
 from PyQt6 import QtCore
 
 PORT = 4827
-EXPOSURE_MS = 1000.0
-BINNING = ("2x2", "2")              # the binning value, as the camera names it
+EPI_BINNING, EPI_EXPOSURE_MS = "2x2", 1000.0  # what the epi images are taken with (set in Micro-Manager)
 TIMEOUT_MS = 10000                  # for each call; a snap takes the exposure and the readout
-LIVE_PERIOD_S = 0.25                # live: a new frame 4 times a second at most (Micro-Manager live; a snap is 1 s)
+LIVE_PERIOD_S = 0.25                # live: a frame read 4 times a second at most
+MAX_FAILURES = 3                    # live: frames failing in a row before giving up
+FROZEN_S = 5.0                      # live: the same frame for this long (plus 2 exposures) is said: camera stuck?
+FIRST_FRAME_S = 5.0                 # live just switched on: its first frame awaited this long
 
 
 class CameraError(RuntimeError):
@@ -32,12 +36,13 @@ def server_listening(port: int = PORT) -> bool:
 
 
 class MicroManager:
-    """Micro-Manager's core through its server. Every call blocks: Feed makes them in its own thread."""
+    """Micro-Manager's core and its live manager, through its server. Every call blocks: Feed makes them in its own
+    thread. Only Micro-Manager's own Snap and Live touch the camera."""
 
     def __init__(self, port: int = PORT):
         self.port = port
         self._core = None
-        self._binning: str | None = None
+        self._live = None
 
     def _connect(self):
         if self._core is None:
@@ -49,45 +54,72 @@ class MicroManager:
             except ImportError as e:
                 raise CameraError("pyjavaz is not installed: pip install pyjavaz") from e
             self._core = JavaObject("mmcorej.CMMCore", port=self.port, timeout=TIMEOUT_MS)
-            self._binning = None
-        return self._core
+            self._live = JavaObject("org.micromanager.Studio", port=self.port, timeout=TIMEOUT_MS).live()
+        return self._core, self._live
 
-    def frame(self) -> tuple[np.ndarray, bool]:
-        """(image, live): the latest frame of Micro-Manager's live mode while it runs, else a snap at the epi
-        settings."""
+    def _call(self, what):
+        """``what(core, live)``, its failure a CameraError (and a new connection next time)."""
         try:
-            core = self._connect()
-            live = core.is_sequence_running()
-            if live:
-                pixels = core.get_last_image()
-            else:
-                self._epi_settings(core)
-                core.snap_image()
-                pixels = core.get_image()
-            return np.asarray(pixels).reshape(core.get_image_height(), core.get_image_width()), live
+            return what(*self._connect())
         except CameraError:
             raise
         except Exception as e:  # noqa: BLE001  (bridge timeout, Micro-Manager closed or busy...)
-            self._core = None                       # connect again next time
+            self._core = self._live = None
             raise CameraError(f"Micro-Manager: {e}") from e
 
-    def _epi_settings(self, core):
-        if abs(core.get_exposure() - EXPOSURE_MS) > 0.5:
-            core.set_exposure(EXPOSURE_MS)
-        cam = core.get_camera_device()
-        if self._binning is None and core.has_property(cam, "Binning"):
-            allowed = core.get_allowed_property_values(cam, "Binning")
-            values = [allowed.get(i) for i in range(allowed.size())]
-            self._binning = next((v for v in BINNING if v in values), "")
-        if self._binning and core.get_property(cam, "Binning") != self._binning:
-            core.set_property(cam, "Binning", self._binning)
+    @staticmethod
+    def _image(core, pixels) -> np.ndarray:
+        return np.asarray(pixels).reshape(core.get_image_height(), core.get_image_width())
+
+    def settings(self) -> tuple[str, float]:
+        """The camera's binning and exposure (ms), as Micro-Manager has them."""
+        def read(core, live):
+            cam = core.get_camera_device()
+            return (core.get_property(cam, "Binning") if core.has_property(cam, "Binning") else "?",
+                    float(core.get_exposure()))
+        return self._call(read)
+
+    def snap(self) -> np.ndarray:
+        """Micro-Manager's current frame while it streams (its live), else its own Snap."""
+        def snap(core, live):
+            if core.is_sequence_running():
+                return self._image(core, core.get_last_image())
+            live.snap(True)                         # as its Snap button: shown in Micro-Manager too
+            return self._image(core, core.get_image())
+        return self._call(snap)
+
+    def live_on(self) -> bool:
+        return bool(self._call(lambda core, live: live.is_live_mode_on()))
+
+    def set_live(self, on: bool):
+        self._call(lambda core, live: live.set_live_mode_on(on))
+
+    def last_frame(self) -> np.ndarray | None:
+        """The latest frame of Micro-Manager's live; None while it has none yet (live just switched on)."""
+        def last(core, live):
+            if not core.is_sequence_running():
+                return None
+            try:
+                pixels = core.get_last_image()
+            except Exception as e:  # noqa: BLE001
+                if "empty" in str(e).lower():       # "Circular buffer is empty": no frame yet
+                    return None
+                raise
+            return self._image(core, pixels)
+        return self._call(last)
 
 
 class Feed(QtCore.QObject):
-    """Frames from Micro-Manager made in a thread of their own: one (snap), or one after the other while ``live``."""
+    """Images from Micro-Manager, taken in a thread of their own: one (snap), or one after the other while ``live``.
 
-    frame = QtCore.pyqtSignal(object, bool)         # image, from Micro-Manager's live mode
-    failed = QtCore.pyqtSignal(str)
+    Live switches Micro-Manager's own live mode on (when it is not already), then reads its frames: stopping it in
+    Micro-Manager stops it here too, and stopping it here stops Micro-Manager's only if Oriole had switched it on.
+    A frame that fails is skipped, MAX_FAILURES in a row end the live; a frame unchanged for FROZEN_S is said.
+    """
+
+    frame = QtCore.pyqtSignal(object, bool)         # image, from a live stream
+    note = QtCore.pyqtSignal(str, str)              # text, log level: settings, skipped frame, frozen camera
+    ended = QtCore.pyqtSignal(str, str)             # text, log level: the snap or live failed, or live stopped
 
     def __init__(self, source=None, parent=None):
         super().__init__(parent)
@@ -95,6 +127,7 @@ class Feed(QtCore.QObject):
         self.live = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._settings: tuple[str, float] | None = None
 
     @property
     def busy(self) -> bool:
@@ -108,26 +141,93 @@ class Feed(QtCore.QObject):
         if on:
             self._start()
 
+    def close(self, wait_s: float = 2.0):
+        """Live off (Micro-Manager's too if Oriole switched it on), waiting for the thread a moment."""
+        self.live = False
+        thread = self._thread
+        if thread is not None:
+            thread.join(wait_s)
+
     def _start(self):
         with self._lock:
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="Micro-Manager", daemon=True)
                 self._thread.start()
 
+    def _end(self, text: str = "", level: str = "info") -> bool:
+        """The thread ends (said when ``text``) unless live was switched on again meanwhile (decided under the
+        lock: set_live(True) never finds a dying thread)."""
+        with self._lock:
+            if self.live and not text:
+                return False
+            self.live, self._thread = False, None
+        if text:
+            self.ended.emit(text, level)
+        return True
+
+    def _report_settings(self) -> float:
+        """Binning and exposure said when they change; the exposure (s)."""
+        binning, exposure = self.source.settings()
+        if (binning, exposure) != self._settings:
+            self._settings = (binning, exposure)
+            epi = binning == EPI_BINNING and abs(exposure - EPI_EXPOSURE_MS) < 1
+            self.note.emit(f"Micro-Manager camera: binning {binning}, {exposure:.0f} ms" +
+                           ("" if epi else f" (epi images: {EPI_BINNING}, {EPI_EXPOSURE_MS:.0f} ms; set them in "
+                                           f"Micro-Manager)"), "info" if epi else "warn")
+        return exposure / 1000
+
     def _run(self):
-        while True:
-            t0 = time.monotonic()
-            try:
-                image, mm_live = self.source.frame()
-            except CameraError as e:
-                with self._lock:
-                    self.live, self._thread = False, None
-                self.failed.emit(str(e))
-                return
-            self.frame.emit(image, mm_live)
-            if self.live:
-                time.sleep(max(0.0, LIVE_PERIOD_S - (time.monotonic() - t0)))
-            with self._lock:                        # decided under the lock: set_live(True) never finds a dying thread
-                if not self.live:
-                    self._thread = None
+        try:
+            exposure_s = self._report_settings()
+            if not self.live:
+                self.frame.emit(self.source.snap(), False)
+            while not self._end():                  # live (switched on during the snap, or again meanwhile)
+                reason = self._run_live(exposure_s)
+                if reason:
+                    self._end(*reason)
                     return
+        except CameraError as e:
+            self._end(str(e), "error")
+
+    def _run_live(self, exposure_s: float) -> tuple[str, str] | None:
+        """Frames of Micro-Manager's live while ``live``; why it must end, if it must."""
+        mine = not self.source.live_on()            # Micro-Manager's live switched on by Oriole: off again after
+        if mine:
+            self.source.set_live(True)
+        failures, last, t_start = 0, None, time.monotonic()
+        same_since, said = t_start, False
+        try:
+            while self.live:
+                t0 = time.monotonic()
+                try:
+                    if not self.source.live_on():
+                        mine = False
+                        return "Micro-Manager's live was stopped: Oriole's Live too", "warn"
+                    image = self.source.last_frame()
+                    failures = 0
+                except CameraError as e:
+                    failures += 1
+                    if failures >= MAX_FAILURES:
+                        return f"{e} ({failures} frames in a row): Live off", "error"
+                    self.note.emit(f"{e}: frame skipped", "warn")
+                    image = None
+                if image is None:
+                    if last is None and t0 - t_start > FIRST_FRAME_S:
+                        return f"no frame from Micro-Manager's live within {FIRST_FRAME_S:.0f} s: Live off", "error"
+                elif last is not None and np.array_equal(image, last):
+                    if not said and t0 - same_since > FROZEN_S + 2 * exposure_s:
+                        said = True
+                        black = " and black" if not image.any() else ""
+                        self.note.emit(f"Micro-Manager's live frame unchanged{black} for {t0 - same_since:.0f} s: "
+                                       f"camera stuck? (see Micro-Manager; restarting it frees the camera)", "warn")
+                else:
+                    last, same_since, said = image, t0, False
+                    self.frame.emit(image, True)
+                time.sleep(max(0.0, LIVE_PERIOD_S - (time.monotonic() - t0)))
+            return None
+        finally:
+            if mine:                                # leave Micro-Manager as found
+                try:
+                    self.source.set_live(False)
+                except CameraError:
+                    pass

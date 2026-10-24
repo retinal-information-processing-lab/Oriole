@@ -63,14 +63,23 @@ size (2.5 µm, visual *Settings*). The line under the image shows where the mous
 
 **Spot Ø** is the diameter of every spot, in µm on the sample.
 
-**Snap** / **Live** take the image from Micro-Manager, which keeps the camera: Oriole asks the
-running Micro-Manager, through its pycro-manager server (Micro-Manager: *Tools → Options → Run
-pycro-manager server on port 4827*, ticked once), for a snap at the epi settings, 1000 ms exposure
-and binning 2×2 (set on the camera first if they differ), or, while Micro-Manager's own live mode
-runs, for its latest frame (its settings then left alone). *Live* takes one image after the other
-(about one a second at 1000 ms; four a second at most from Micro-Manager's live) until pressed
-again; the spots stay, and the image is logged once. Micro-Manager not running, or its server off:
-said in the log after half a second.
+**Snap** / **Live** take the image from Micro-Manager, which keeps the camera. Oriole talks to it
+through its pycro-manager server (in Micro-Manager, tick *Tools → Options → Run pycro-manager server
+on port 4827* once) and never commands the camera directly. On the rig, changing the binning from
+Oriole left the Hamamatsu sending black frames until Micro-Manager was restarted.
+* **Snap** is Micro-Manager's own Snap (shown in Micro-Manager too), or its current frame while
+  its live runs.
+* **Live** switches Micro-Manager's own live on, unless it's already on, and shows its frames (four
+  a second at most); the spots stay, and the image is logged once. Stopping it in Micro-Manager
+  stops it here too. Stopping it here stops Micro-Manager's live only if Oriole switched it on.
+  * A frame that fails is skipped (said in the log); 3 failures in a row switch Live off.
+  * A frame that doesn't change for 5 s (frozen camera; "and black" when it is all zero) is said
+    in the log.
+* **Camera settings:** Oriole never changes them. It logs them (binning, exposure) when they
+  change, in yellow when they differ from the epi settings (2×2, 1000 ms): set those in
+  Micro-Manager.
+* **Micro-Manager not running, or its server off:** said in the log after half a second.
+* **Quitting:** Oriole always quits completely, even when Micro-Manager no longer answers.
 
 The epi image is expected binned 2×2, at **672 × 512 px** (width × height), the size the
 calibrations are made for. Any other size gives a big red "WRONG IMAGE SIZE" banner above the holo

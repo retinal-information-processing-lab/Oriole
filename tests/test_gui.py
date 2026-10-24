@@ -725,31 +725,54 @@ def test_micro_manager_snap_and_live(window, monkeypatch):
     log = w.log_view.toPlainText
     monkeypatch.setattr("oriole.camera.LIVE_PERIOD_S", 0.005)
 
-    class Source:
+    class Source:                                       # Micro-Manager as camera.Feed uses it
         def __init__(self):
-            self.n, self.error = 0, None
+            self.n, self.error, self.mm_live = 0, None, False
 
-        def frame(self):
+        def settings(self):
+            return "2x2", 100.0
+
+        def snap(self):
             if self.error:
                 raise CameraError(self.error)
             self.n += 1
-            return np.full((512, 672), self.n, np.uint16), False
+            return np.full((512, 672), self.n, np.uint16)
+
+        def live_on(self):
+            if self.error:
+                raise CameraError(self.error)
+            return self.mm_live
+
+        def set_live(self, on):
+            self.mm_live = on
+
+        def last_frame(self):
+            self.n += 1
+            return np.full((512, 672), self.n, np.uint16)
     w.feed.source = src = Source()
     w.btn_snap.click()
     assert not w.btn_snap.isEnabled()
     wait_for(lambda: w.image is not None)
     assert "image Micro-Manager snap: 672 x 512 px" in log() and w.btn_snap.isEnabled() and w.lbl_image_warning.isHidden()
+    assert "Micro-Manager camera: binning 2x2, 100 ms (epi images: 2x2, 1000 ms; set them in Micro-Manager)" in log()
     w._on_click(100.0, 100.0, False)
 
-    # live: one image after the other, logged once, the spots kept
+    # live: Micro-Manager's, its frames one after the other, logged once, the spots kept
     w.btn_live.click()
     assert w.btn_live.isChecked() and not w.btn_snap.isEnabled() and "Micro-Manager live: on" in log()
     wait_for(lambda: src.n >= 5 and w.image[0, 0] >= 4)
-    assert log().count("image Micro-Manager live: 672 x 512 px") == 1 and w.spots == [(100.0, 100.0)]
+    assert src.mm_live and log().count("image Micro-Manager live: 672 x 512 px") == 1 and w.spots == [(100.0, 100.0)]
     w.btn_live.click()
     wait_for(lambda: not w.feed.busy)
     QtWidgets.QApplication.processEvents()
-    assert "Micro-Manager live: off" in log() and w.btn_snap.isEnabled()
+    assert "Micro-Manager live: off" in log() and w.btn_snap.isEnabled() and not src.mm_live
+
+    # stopped in Micro-Manager: Oriole's Live goes off by itself
+    w.btn_live.click()
+    wait_for(lambda: src.mm_live)
+    src.mm_live = False
+    wait_for(lambda: not w.btn_live.isChecked())
+    assert "Micro-Manager's live was stopped: Oriole's Live too" in log() and w.btn_snap.isEnabled()
 
     # Micro-Manager not there: said, live off
     src.error = "Micro-Manager not found on port 4827: start it"

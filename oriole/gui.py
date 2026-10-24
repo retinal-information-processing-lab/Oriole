@@ -39,9 +39,11 @@ START_TIMEOUT_S = 20.0          # Wavefront started by Oriole, its program still
 HELP_HTML = f"""
 <h3>Spots</h3>
 <p><b>Load image…</b> an epi image binned 2×2, {EPI_SIZE[0]} × {EPI_SIZE[1]} px (any other size: big red
-warning), or take it from Micro-Manager: <b>Snap</b> (one image at {camera.EXPOSURE_MS:.0f} ms, binning 2×2) or
-<b>Live</b> (one after the other; the frames of Micro-Manager's own live mode while it runs). Micro-Manager must be
-running with Tools → Options → <i>Run pycro-manager server on port {camera.PORT}</i> ticked.<br>
+warning), or take it from Micro-Manager, which keeps the camera: <b>Snap</b> is Micro-Manager's own Snap (or its
+current live frame while its live runs), <b>Live</b> switches Micro-Manager's own live on and shows its frames
+(stopping it in Micro-Manager stops it here too). Oriole never changes the camera settings: set binning
+{camera.EPI_BINNING} and {camera.EPI_EXPOSURE_MS:.0f} ms in Micro-Manager (the log says when they differ). Micro-Manager must
+be running with Tools → Options → <i>Run pycro-manager server on port {camera.PORT}</i> ticked.<br>
 <b>Left click</b> adds a spot, <b>drag</b> a spot to move it, <b>right click</b> on a spot removes it.
 <b>Undo</b> / <b>Clear</b>. <b>Spot Ø</b> is the diameter of every spot on the sample (µm).</p>
 <h3>Calibrations (typed by hand, one per side)</h3>
@@ -177,7 +179,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wf_started: float | None = None            # when Oriole started it, until it is ready
         self.feed = camera.Feed(parent=self)
         self.feed.frame.connect(self._on_frame)
-        self.feed.failed.connect(self._on_camera_failed)
+        self.feed.note.connect(self.log)
+        self.feed.ended.connect(self._on_camera_ended)
         self.timer = QtCore.QTimer(self)
         self.timer.setInterval(100)
         self.timer.timeout.connect(self.poll)
@@ -250,9 +253,9 @@ class MainWindow(QtWidgets.QMainWindow):
         col = QtWidgets.QVBoxLayout()
         bar = QtWidgets.QHBoxLayout()
         bar.addWidget(button("Load image…", self.load_image_dialog))
-        mm = f"Micro-Manager ({camera.EXPOSURE_MS:.0f} ms, binning 2x2; its server on port {camera.PORT})"
-        self.btn_snap = button("Snap", self.snap, f"One image from {mm}")
-        self.btn_live = button("Live", lambda: None, f"Images from {mm}, one after the other",
+        mm = f"(its server on port {camera.PORT}; the camera settings are Micro-Manager's)"
+        self.btn_snap = button("Snap", self.snap, f"Micro-Manager's Snap {mm}")
+        self.btn_live = button("Live", lambda: None, f"Micro-Manager's live, shown here {mm}",
                                "QPushButton:checked { background: #8B1A1A; color: white; }")
         self.btn_live.setCheckable(True)
         self.btn_live.toggled.connect(self._on_live)
@@ -497,8 +500,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.set_image(image, source, announce=source != self.image_source or not self.feed.live)
         self.btn_snap.setEnabled(not self.btn_live.isChecked())
 
-    def _on_camera_failed(self, message: str):
-        self.log(message, "error")
+    def _on_camera_ended(self, message: str, level: str):
+        self.log(message, level)
         self.btn_live.setChecked(False)
         self.btn_snap.setEnabled(True)
 
@@ -1220,7 +1223,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_shutter_output()
 
     def closeEvent(self, ev):
-        self.feed.live = False
+        self.feed.live = False                          # its thread waited for at the end
         self.wf_timer.stop()
         self.wf_check.stop()
         if self.generation is not None:
@@ -1231,6 +1234,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.close_shutter()
         self.timer.stop()
         self.save_config()
+        self.feed.close()                               # Micro-Manager's live off if Oriole had switched it on
         super().closeEvent(ev)
 
 
