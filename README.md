@@ -17,11 +17,14 @@ Both share `~/.oriole/config.json` (each ignores the other's extra keys). What d
   Wavefront Oriole drives: IV, through its script folder as on `oriole`, or V, over TCP (not ready
   yet).
 * **Phase masks of this session:**
-  * **Chosen at every start:** when Oriole opens, it asks for the folder of the experiment. The
-    dialog opens on the experiment drive (`experiment_drive`, `D:\` by default), and Oriole makes a
-    `Phasemasks` folder in it; a chosen folder already named so is used as it is. Nothing is
-    remembered between runs.
-  * **Needed by:** Generate, Load, and that folder's 🧹 and 📂. **…** chooses another.
+  * **Asked at the first Generate:** nothing opens when Oriole starts. The first **GENERATE PHASE
+    MASKS** of a session asks for the folder of the experiment, then goes on. The dialog opens on
+    the experiment drive (`experiment_drive`, `D:\` by default), and Oriole makes a `Phasemasks`
+    folder in it; a chosen folder already named so is used as it is. Nothing is remembered between
+    runs.
+  * **The button:** green while no folder is chosen yet; yellow only when a folder (Wavefront's or
+    the session's) holds masks or scripts.
+  * **Needed by:** Load, and that folder's 🧹 and 📂. **…** chooses it, or another.
   * **How masks get there:** Wavefront IV can't be told by script where to save, so it still saves
     each mask in its `GeneratedPhasemasks`. Oriole moves the checked masks (the 6 files of each)
     into the session's folder once the generation is done, then writes `Pattern_spots.json` there.

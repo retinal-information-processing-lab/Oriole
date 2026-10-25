@@ -64,8 +64,7 @@ def window(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(experiment)))
     monkeypatch.setattr("oriole.holo.STORE_SETTLE_S", 0)                 # masks stored as soon as the last is saved
     w = MainWindow(cfg, config_path=tmp_path / "cfg.json")
-    w.ask_mask_folder.stop()                            # what the dialog asked at start gives:
-    w.set_mask_folder(experiment)
+    w.set_mask_folder(experiment)                       # as chosen at the first Generate
     w.daq_log, w.asked, w.answers = daq_log, asked, answers
     w.show()
     yield w
@@ -887,29 +886,43 @@ def test_tcp_version_session_phase_mask_folder(qapp, tmp_path, monkeypatch):
                         staticmethod(lambda parent, title, start: picked.setdefault("start", start) and
                                      picked["folder"]))
     cfg = Config(wfd_root=str(tmp_path / "wfd"), start_wavefront=False, experiment_drive=str(tmp_path))
+    for d in (cfg.wfd_script_dir, cfg.wfd_output_dir):
+        os.makedirs(d)
+    (tmp_path / "wfd" / "wfdIV.exe").write_bytes(b"")
     w = MainWindow(cfg, config_path=tmp_path / "cfg.json")
     log = w.log_view.toPlainText
     assert w.windowTitle() == "Oriole TCP"
     actions = w.wavefront_actions
     assert actions["IV"].isChecked() and not actions["V"].isEnabled()           # V: not ready yet
 
-    # asked first thing, the dialog opening on the experiment drive; Cancel: nothing can be generated nor swept
+    # nothing asked when Oriole opens; Generate green, the folder's broom and 📂 off until it is chosen
     QtWidgets.QApplication.processEvents()
-    assert picked["start"] == str(tmp_path) and w.mask_dir is None
-    assert "no phase mask folder for this session" in log() and w.lbl_output_dir.text() == ""
-    assert w.btn_generate.text() == "CHOOSE A PHASE MASK FOLDER"
+    assert "start" not in picked and w.mask_dir is None and w.lbl_output_dir.text() == ""
+    assert w.btn_generate.text() == "GENERATE PHASE MASKS" and "#00FF00" in w.btn_generate.styleSheet()
     assert not w.btn_sweep_masks.isEnabled() and not w.btn_open_masks.isEnabled()
+
+    # Generate asks for it, the dialog opening on the experiment drive: Cancel, nothing sent
     w.set_image(np.zeros((512, 672), np.float32))
     w._on_click(100.0, 100.0, False)
-    w.generate()                                        # asks again: still Cancel, nothing sent
-    assert w.mask_dir is None and not w.jobs
+    w.generate()
+    assert picked["start"] == str(tmp_path) and w.mask_dir is None and not w.jobs
+    assert "no phase mask folder chosen: nothing generated" in log()
 
-    # a folder already named Phasemasks is used as it is; its masks are listed
+    # chosen: the generation goes on into it
+    (tmp_path / "exp").mkdir()
+    picked["folder"] = str(tmp_path / "exp")
+    w.generate()
+    assert w.mask_dir == tmp_path / "exp" / "Phasemasks" and w.jobs and w.btn_generate.text() == "■ STOP"
+    w.stop_generation()
+    w.cleanup["at"] -= holo.ABORT_WAIT_S
+    w.poll()
+
+    # a folder already named Phasemasks is used as it is; its masks are listed, and Generate turns yellow
     existing = tmp_path / "exp2" / "Phasemasks"
     existing.mkdir(parents=True)
     (existing / "Pattern3_000.algoPhp.png").write_bytes(b"png")
     picked["folder"] = str(existing)
     w.btn_choose_masks.click()
     assert w.mask_dir == existing and "(already 1 mask there)" in log() and w.combo_mask.currentText() == "3"
-    assert w.btn_sweep_masks.isEnabled() and w.btn_generate.text() == "GENERATE PHASE MASKS"
+    assert w.btn_sweep_masks.isEnabled() and "#FFD700" in w.btn_generate.styleSheet()
     w.close()
