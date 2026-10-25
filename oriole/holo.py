@@ -23,14 +23,15 @@ MASK_SUFFIX = "_000.algoPhp.png"     # Wavefront saves profile <name> as <name>_
 SRC_SUFFIX = "_000.rawSrc.png"       # ... and the pattern it drew for it as <name>_000.rawSrc.png
 RECORD_NAME = f"{PREFIX}_spots.json"
 LIST_IDS = 500                       # pattern IDs 0..LIST_IDS deleted to empty Wavefront's list (0.7 ms each)
-MASK_WAIT_S = 10.0                  # a mask still not saved this long after its script was sent: sent again
-MAX_ATTEMPTS = 3                     # sends of the same script before giving up
+MASK_WAIT_S = 10.0                  # a mask's script not answered this long after it was sent: sent again
+MAX_ATTEMPTS = 3                     # sends of the same mask before giving up
+SAVE_WAIT_S = 3.0                   # its script answered, its mask file still not there this long after: not saved
 # Wavefront's field as it draws it, in µm around its (0, 0) (measured on its display, rig wfdIV_20261022): its
 # 576 px canvas, a square; its diffraction efficiency circles, by %; a cross at the centre
 FIELD_HALF_UM = 187.8
 EFFICIENCY_RADII_UM = {90: 47.0, 80: 68.4, 70: 86.3, 60: 103.0, 50: 119.6, 40: 137.0, 30: 156.2, 20: 179.0}
 CROSS_HALF_UM = 18.0
-MAX_SWEEPS = 10                     # sweeps of the Wavefront folders after an abort, while a file is left
+MAX_SWEEPS = 10                     # sweeps of Wavefront's phase mask folder after an abort, while a file is left
 STORE_SETTLE_S = 1.0                # masks moved to the session folder this long after the last one is saved
 STORE_WAIT_S = 10.0                 # ... and again while one of their files is in use, this long at most
 ABORT_WAIT_S = 2.0                 # after an abort Wavefront may still be computing: sweep only after this long
@@ -110,12 +111,12 @@ class UnsafeSweep(RuntimeError):
     """A folder Oriole refuses to sweep: nothing is deleted."""
 
 
-# The only folders a sweep may touch, by name, and the only files it may delete there: what Wavefront and Oriole
-# write. Wavefront's own folders must lie in its install; Phasemasks is the session folder Oriole made.
-MASK_FILES = re.compile(rf"^({PREFIX}\d+_000\.[\w.]+|{re.escape(RECORD_NAME)})$")
-SWEEPABLE = {"generatedphasemasks": (MASK_FILES, True), "phasemasks": (MASK_FILES, False)}
 SESSION_FOLDER = "Phasemasks"       # made inside the folder chosen for the experiment: the masks of the session
 INSTALL_MARK = "wfdIV.exe"          # Wavefront's folders lie in its install, next to its launcher
+# The only folders a sweep may touch, by name, and the only files it may delete there: what Wavefront and Oriole
+# write. Wavefront's own folder must lie in its install; Phasemasks is the session folder Oriole made.
+MASK_FILES = re.compile(rf"^({PREFIX}\d+_000\.[\w.]+|{re.escape(RECORD_NAME)})$")
+SWEEPABLE = {"generatedphasemasks": (MASK_FILES, True), SESSION_FOLDER.lower(): (MASK_FILES, False)}
 
 
 def sweep_rule(folder) -> re.Pattern:

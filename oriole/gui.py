@@ -1,9 +1,9 @@
 """Oriole window: visual (DMD) on the left, the image to click spots on in the middle, holo (SLM) on the right.
 
 Look and dark theme taken from Plerion; the holo side follows the MATLAB DHgui. Wavefront IV gets its scripts over
-TCP (tcplink), no script folder: the phase masks of a generation one at a time, polled every 100 ms (a mask it does not
-save in time is sent again, MAX_ATTEMPTS sends in all), or a Load. Images come from a file or from Micro-Manager
-(camera.Feed).
+TCP (tcplink), one at a time, each answering once it ran (read every 100 ms): the phase masks of a generation (a mask
+whose script does not answer in time is sent again, MAX_ATTEMPTS sends in all), a Load, a ping. Its Tcp server is
+ticked by a script dropped in its script folder. Images come from a file or from Micro-Manager (camera.Feed).
 """
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 from . import camera, holo, tcplink, visual, wavefront
-from .calibration import EPI_SIZE
+from .calibration import EPI_SIZE, Calibration
 from .config import DEFAULT_CONFIG_PATH, Config
 from .images import load_gray
 from .shutter import Shutter, ShutterError
@@ -32,9 +32,12 @@ from .widgets import (CalibrationBox, FolderEdit, ImageView, action_button, butt
                       spin_box, title_label)
 
 LOG_PATH = DEFAULT_CONFIG_PATH.parent / "oriole.log"   # tracebacks of internal errors
+JOURNAL_PATH = DEFAULT_CONFIG_PATH.parent / "oriole-tcp-journal.log"   # every line of the log, dated (this version)
+JOURNAL_MAX_BYTES = 5_000_000   # a journal this big is started again when Oriole opens (the old one kept as .old)
 TITLE = "Oriole TCP"        # this version (branch tcp): a Wavefront menu, the session's phase mask folder
 RESTART_FIX = "restart Wavefront IV and generate again"
-NOT_SAVED_FIX = f"{tcplink.TCP_HINT} (Wavefront does not remember it), or {RESTART_FIX}"
+NOT_SAVED_FIX = (f"Wavefront IV did not answer: {tcplink.TCP_HINT} if it is not (the state turns green once it runs "
+                 f"Oriole's scripts), then generate again")
 START_TIMEOUT_S = 20.0          # Wavefront started by Oriole, its program still not running after this long
 HELP_HTML = f"""
 <h3>Spots</h3>
@@ -60,23 +63,31 @@ spot and 2(i−1)+1 its negative; a <code>.json</code> lists the frames.<br>
 new frame numbers).</p>
 <h3>Holo · SLM</h3>
 <p><b>Oriole TCP</b> (this version): the <b>Wavefront</b> menu chooses the Wavefront Oriole drives (IV; V not ready
-yet), over TCP: no script folder. For now Wavefront IV's TCP server is switched on by hand: tick <b>Tools → Script
-engine → Tcp server</b> in it after every start (Wavefront does not remember it). Oriole finds its port by itself
-(Wavefront writes it in <code>%TEMP%\\blueBoxServer</code> at every start). The masks of a session go to <b>phase masks of this session</b>: the first
-<b>GENERATE PHASE MASKS</b> asks for the folder of the experiment (the dialog opens on {Config.experiment_drive}) and makes
-a <code>{holo.SESSION_FOLDER}</code> folder in it (one already named so is used as it is); nothing is remembered between
-runs. Load and its 🧹 and 📂 wait for it; <b>…</b> chooses it, or another. Wavefront still saves each mask in its own <code>GeneratedPhasemasks\\</code>, and Oriole
-moves the checked masks into the session's folder once the generation is done.<br>
+yet), over TCP. Oriole finds its port by itself (Wavefront writes it in <code>%TEMP%\\blueBoxServer</code> at every
+start) and sends every script on one connection, made again when Wavefront restarts. Every script answers once
+Wavefront ran it (DONE, or its error), and the next one goes only then: one at a time, as Wavefront needs (a script
+coming while another runs can crash it). Wavefront runs them only with <b>Tools → Script engine → Tcp server</b>
+ticked, which it does not remember: once it is ready Oriole pings it, and if it does not answer, Oriole ticks Tcp server
+itself with a one-line script dropped in its <code>script</code> folder (Wavefront starts in auto-load mode, which
+Start sets). If that cannot be done, tick it by hand: Oriole pings every {tcplink.PING_EVERY_S:.0f} s and the state turns
+green once Wavefront answers. The masks of a session go to <b>phase masks of this session</b>: the first <b>GENERATE PHASE MASKS</b> asks for the
+folder of the experiment (the dialog opens on {Config.experiment_drive}) and makes a <code>{holo.SESSION_FOLDER}</code>
+folder in it (one already named so is used as it is); nothing is remembered between runs. Load and its 🧹 and 📂 wait
+for it; <b>…</b> chooses it, or another. Wavefront still saves each mask in its own <code>GeneratedPhasemasks\\</code>,
+and Oriole moves the checked masks into the session's folder once the generation is done (a folder changed meanwhile
+applies to the next generation).<br>
 <b>Wavefront folder</b>: the Wavefront IV install (<code>wfdIV.exe</code>). 🧹, and the sweeps before a generation
 and after an abort, delete only the files Wavefront and Oriole write, <code>Pattern&lt;n&gt;_000.*</code> and
 <code>Pattern_spots.json</code>: anything else is left alone, and a folder that is not a <code>GeneratedPhasemasks</code>
 folder of a Wavefront install, or a <code>{holo.SESSION_FOLDER}</code> folder, is never swept. After a new install (its
 licence expired: the <b>?</b> next to it says how), pick its folder.<br>
-Under it, Wavefront's state. <b>Start</b> starts it from that folder, saving its masks in its
-<code>GeneratedPhasemasks</code> (set in its settings, <code>%APPDATA%\\wfdIV\\wfdIV.ini</code>); Oriole does so itself
-when it opens (<b>start Wavefront with Oriole</b>). <b>Check</b> connects to its TCP server. The server listens from the
-start, Tcp server ticked or not: only the first mask saved shows that Wavefront runs the scripts (<i>TCP ✓</i>).
-Oriole never closes Wavefront.<br>
+Under it, Wavefront's state: green, <i>TCP ✓</i>, once it answered Oriole's scripts. <b>Start</b> starts it from that
+folder, in auto-load mode and saving its masks in its <code>GeneratedPhasemasks</code> (set in its settings,
+<code>%APPDATA%\\wfdIV\\wfdIV.ini</code>); Oriole does so itself when it opens (<b>start Wavefront with Oriole</b>).
+<b>Check</b> pings it again (and ticks its Tcp server again if it does not answer). Oriole never closes Wavefront. A
+Wavefront opened by hand must run from that folder and save its masks in its
+<code>GeneratedPhasemasks</code> (after a reinstall it may still save them in the old one): otherwise Generate says so
+and sends nothing (close Wavefront and press Start).<br>
 On the image, through the holo calibration, Wavefront's field as Wavefront draws it: its square in
 <span style="color:{NO_GO}">red</span>, the image outside it hatched red (no-go zone: Wavefront cannot put a spot
 there), its 20 % diffraction efficiency circle in <span style="color:{OUTER_CIRCLE}">orange</span> dashes, its 90 %
@@ -90,16 +101,17 @@ being saved), each mask checked against the spot Wavefront drew for it (<code>ra
 It is <span style="color:{WARN}">yellow</span> while Wavefront's
 or the session's phase mask folder is not empty: it then warns and sweeps them only if you say so. While it runs it is
 a red <b>STOP</b>.<br>
-A mask Wavefront does not save within {holo.MASK_WAIT_S:.0f} s of its script is sent again (attempt
-1/{holo.MAX_ATTEMPTS}, 2/{holo.MAX_ATTEMPTS}…); at {holo.MAX_ATTEMPTS}/{holo.MAX_ATTEMPTS} the generation is aborted.
-After STOP or an abort Oriole waits {holo.ABORT_WAIT_S:.0f} s (Wavefront may still be computing), then sweeps
-Wavefront's phase mask folder, again every second until it is empty: ready to generate again (is Tcp server ticked?
-Or restart Wavefront).<br>
-<b>Manual</b>: pick a mask number and <b>Load</b> it onto the SLM (sent over TCP; Wavefront answers nothing): its spot
-gets a
+A mask's script that does not answer within {holo.MASK_WAIT_S:.0f} s is sent again (attempt 1/{holo.MAX_ATTEMPTS},
+2/{holo.MAX_ATTEMPTS}…); at {holo.MAX_ATTEMPTS}/{holo.MAX_ATTEMPTS} the generation is aborted. A script that answers
+with an error, or whose mask is not saved {holo.SAVE_WAIT_S:.0f} s after it answered, aborts it too. After STOP or an
+abort Oriole waits {holo.ABORT_WAIT_S:.0f} s (Wavefront may still be computing), then sweeps Wavefront's phase mask
+folder, again every second until it is empty: ready to generate again.<br>
+<b>Manual</b>: pick a mask number and <b>Load</b> it onto the SLM (over TCP): once Wavefront answered it is loaded, and
+its spot gets a
 <span style="color:{SLM_RING}">purple SLM ring</span> on the image (where it was clicked, from
 <code>Pattern_spots.json</code>); <b>Open</b> / <b>Close</b> the shutter (close it before a Plerion protocol).</p>
-<p>Everything typed is saved in <code>~/.oriole/config.json</code>.</p>
+<p>Everything typed is saved in <code>~/.oriole/config.json</code>. Every line of the log is also kept, dated, in
+<code>~/.oriole/{JOURNAL_PATH.name}</code>: what happened, to read again after a problem.</p>
 """
 
 
@@ -157,7 +169,22 @@ class Job:
     png: Path
     spot: int = 0
     attempt: int = 1                        # sends so far
+    sid: int | None = None                  # the id of its last send (tcplink: its answer)
     sent: float = 0.0                       # time.time() of the last send
+    answered: float | None = None           # time.time() its script answered DONE: Wavefront ran it whole
+
+
+@dataclass
+class Generation:
+    """The masks being made, from these spots. Both folders are fixed when it starts: a folder changed in the
+    settings meanwhile applies to the next one."""
+    spots_px: list[tuple[float, float]]
+    spots_um: np.ndarray
+    diameter: float
+    cal: Calibration
+    fits: list[str]                         # holo.field_fit of each spot
+    out_dir: Path                           # Wavefront's GeneratedPhasemasks, where it saves them
+    mask_dir: Path                          # the session's Phasemasks, where they are moved once all are saved
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -176,15 +203,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.slm_spot: dict | None = None               # where the mask loaded on the SLM was clicked
         self.shutter = Shutter(config.nidaq_device, config.shutter_ao)
         self.jobs: list[Job] = []                       # the masks of a generation, the first one sent to Wavefront
-        self.generation: dict | None = None             # the spots of the masks being generated
-        self.cleanup: dict | None = None                # after an abort: both folders swept once Wavefront is done
+        self.generation: Generation | None = None       # the masks being generated
+        self.cleanup: dict | None = None                # after an abort: Wavefront's folder swept once it is done
         self.storing: dict | None = None                # a generation done: its masks moved into the session folder
         self.mask_dir: Path | None = None               # this session's Phasemasks folder, chosen at every start
         self.wf_folder: Path | None = None              # install the running Wavefront started from
+        self.wf_pid: int | None = None                  # its process: another one, another server and tick
         self.wf_ready = False                           # its window is open
         self.link = tcplink.Wavefront4Link()            # its TCP server, where every script goes
         self.wf_port: int | bool | None = None          # the port it was reached on (False: not reachable; None: not tried)
-        self.wf_runs: bool | None = None                # it runs the scripts: a mask saved (False: none saved in time)
+        self.wf_answers: bool | None = None             # it runs Oriole's scripts: they answer (None: not tried yet)
+        self.waiting: dict | None = None                # a ping, a Load or the Tcp server tick, not answered yet
+        self.tick_tried = False                         # Oriole tried to tick this Wavefront's Tcp server
+        self.last_ping = 0.0                            # time.time() of the last ping
         self.wf_started: float | None = None            # when Oriole started it, until it is ready
         self.feed = camera.Feed(parent=self)
         self.feed.frame.connect(self._on_frame)
@@ -202,6 +233,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wf_check.timeout.connect(self._first_check)
         self.setWindowTitle(TITLE)
         self.resize(1500, 900)
+        self._start_journal()
         self._build()
         self.redraw_spots()
         self.refresh_masks()
@@ -367,7 +399,7 @@ class MainWindow(QtWidgets.QMainWindow):
         row.addWidget(self.spin_ao)
         box.addLayout(row)
         self.chk_start_wavefront = QtWidgets.QCheckBox("start Wavefront with Oriole")
-        self.chk_start_wavefront.setToolTip("when Oriole opens and Wavefront is not running, start it (then tick its "
+        self.chk_start_wavefront.setToolTip("when Oriole opens and Wavefront is not running, start it (Oriole ticks its "
                                             "Tcp server)")
         self.chk_start_wavefront.setChecked(self.config.start_wavefront)
         self.chk_start_wavefront.toggled.connect(self._on_start_wavefront)
@@ -491,9 +523,28 @@ class MainWindow(QtWidgets.QMainWindow):
         dialog.raise_()
 
     def log(self, text: str, level: str = "info"):
+        """A line in the log, and in JOURNAL_PATH (what happened, read again after a problem on the rig)."""
+        now = _dt.datetime.now()
         big = "; font-size: 14pt; font-weight: bold" if level == "alarm" else ""
         self.log_view.appendHtml(f'<span style="color:{LOG_COLOURS[level]}{big}">'
-                                 f'{_dt.datetime.now():%H:%M:%S}  {html.escape(text)}</span>')
+                                 f'{now:%H:%M:%S}  {html.escape(text)}</span>')
+        try:
+            with open(JOURNAL_PATH, "a", encoding="utf-8") as f:
+                f.write(f"{now:%Y-%m-%d %H:%M:%S}  {level:5}  {text}\n")
+        except OSError:
+            pass
+
+    @staticmethod
+    def _start_journal():
+        """A line where this run starts; a journal grown too big kept aside as .old."""
+        try:
+            JOURNAL_PATH.parent.mkdir(parents=True, exist_ok=True)
+            if JOURNAL_PATH.exists() and JOURNAL_PATH.stat().st_size > JOURNAL_MAX_BYTES:
+                os.replace(JOURNAL_PATH, JOURNAL_PATH.with_name(JOURNAL_PATH.name + ".old"))
+            with open(JOURNAL_PATH, "a", encoding="utf-8") as f:
+                f.write(f"\n{_dt.datetime.now():%Y-%m-%d %H:%M:%S}  ----- {TITLE} opens\n")
+        except OSError:
+            pass
 
     def internal_error(self, kind, value, tb):
         """An exception no slot caught (sys.excepthook): logged, its traceback in LOG_PATH, Oriole goes on (PyQt
@@ -757,8 +808,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.check_wavefront()
 
     def start_wavefront(self):
-        """Start Wavefront from the Wavefront folder, saving masks where Oriole reads them; its Tcp server is then
-        ticked by hand."""
+        """Start Wavefront from the Wavefront folder, in auto-load mode (where Oriole ticks its Tcp server once it is
+        ready) and saving masks where Oriole reads them."""
         procs = wavefront.running()
         if "core" in procs:
             self.log(f"Wavefront IV is already running (from {procs['core'][1]})")
@@ -778,71 +829,78 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         self.wf_started = time.time()
         done = f"; set in {wavefront.INI_PATH.name}: {', '.join(changed)}" if changed else ""
-        self.log(f"starting Wavefront IV from {folder}{done}; then {tcplink.TCP_HINT}")
+        self.log(f"starting Wavefront IV from {folder}{done}; Oriole ticks its Tcp server once it is ready")
         self._show_wavefront()
 
     def check_wavefront(self):
-        """Connect to Wavefront's TCP server. It listens from the start, Tcp server ticked or not: only the first mask
-        saved shows that Wavefront runs the scripts."""
-        if self._wavefront_missing(log=True):
+        """Ping Wavefront: answered, it runs Oriole's scripts. Not answered: Oriole ticks its Tcp server again."""
+        if self._wavefront_problem():
             return
-        try:
-            self.wf_port = self.link.check()
-        except tcplink.LinkError as e:
-            self.wf_port = False
-            self.log(str(e), "error")
-        else:
-            runs = ("it runs the scripts ✓" if self.wf_runs else
-                    f"it runs the scripts only with Tcp server ticked: {tcplink.TCP_HINT} if not done (Wavefront does "
-                    f"not remember it)")
-            self.log(f"Wavefront IV's TCP server reached (port {self.wf_port}); {runs}")
-        self._show_wavefront()
+        if self.script_running or self.computing:
+            self.log("not now: Wavefront is running Oriole's last script", "warn")
+            return
+        self.tick_tried = False
+        self.ping(say=True)
 
     def _watch_wavefront(self):
-        """Every second: is Wavefront running, from which install, ready; its TCP server is checked once it is
-        ready, and said when it does not start."""
+        """Every second: is Wavefront running, from which install, ready. Once it is: pinged (2 s later, then every
+        PING_EVERY_S while it does not answer), and said when it does not start."""
         core = wavefront.running().get("core")
+        pid = core[0] if core else None
+        if pid != self.wf_pid:                          # closed, or another one started: a new port, a new tick
+            if self.waiting is not None and self.waiting["kind"] != "load":
+                self._drop_waiting()
+            self.wf_pid, self.wf_port, self.wf_answers, self.tick_tried = pid, None, None, False
+            self.link.close()
         folder = (core[1] or Path(self.config.wfd_root)) if core else None     # its folder unknown: taken as ours
         ready = core is not None and wavefront.window_open(core[0])
         if ready and not self.wf_ready:                 # just ready (or seen for the first time)
-            saved_in = wavefront.read_ini("mainSettings", "rootPath")
-            if not _same_folder(folder, self.config.wfd_root):
-                self.log(f"Wavefront IV runs from {folder}, not from the Wavefront folder {self.config.wfd_root}: "
-                         f"close it and press Start, or pick {folder} as the Wavefront folder", "error")
-            elif saved_in and not _same_folder(saved_in, self.config.wfd_output_dir):   # started by hand
-                self.log(f"Wavefront IV saves its masks in {saved_in}, not in {self.config.wfd_output_dir}: close it "
-                         f"and press Start (Oriole sets where it saves them)", "error")
-            elif self.wf_port is None:
+            why = self._wavefront_mismatch(folder, saving=True)
+            if why:
+                self.log(why, "error")
+            elif self.wf_answers is None:
                 self.wf_check.start()
-        if core is None:                                # closed: its next start has another port
-            self.wf_port = self.wf_runs = None
-            self.link.close()
         if ready:
             self.wf_started = None
         elif self.wf_started is not None and core is None and time.time() - self.wf_started > START_TIMEOUT_S:
             self.wf_started = None
             self.log(f"Wavefront IV did not start (see its own message): {wavefront.LICENCE_HELP}", "error")
         self.wf_folder, self.wf_ready = folder, ready
+        if (ready and self.wf_answers is False and not self.wf_check.isActive()
+                and time.time() - self.last_ping >= tcplink.PING_EVERY_S):
+            self.ping()
         self._show_wavefront()
 
     def _first_check(self):
-        if self.wf_ready and self.wf_port is None:
-            self.check_wavefront()
+        if self.wf_ready and self.wf_answers is None:
+            self.ping(say=True)
 
-    def _wavefront_missing(self, log: bool = False) -> str | None:
-        """Why Wavefront cannot take Oriole's scripts now (not running, or from another install), if so."""
+    def _wavefront_problem(self, saving: bool = False) -> str | None:
+        """Why Wavefront cannot take Oriole's scripts now, logged: not running, or from another install; ``saving``
+        (a generation): or saving its masks where Oriole does not wait for them."""
         if not wavefront.SUPPORTED:
             return None
         core = wavefront.running().get("core")
         if core is None:
             why = "Wavefront IV is not running: press Start (holo Settings)"
-        elif core[1] is not None and not _same_folder(core[1], self.config.wfd_root):
-            why = f"Wavefront IV runs from {core[1]}, not from the Wavefront folder {self.config.wfd_root}"
         else:
-            return None
-        if log:
+            why = self._wavefront_mismatch(core[1] or Path(self.config.wfd_root), saving)
+        if why:
             self.log(why, "error")
         return why
+
+    def _wavefront_mismatch(self, folder: Path, saving: bool) -> str | None:
+        """The Wavefront running from ``folder`` is not the one of the Wavefront folder; ``saving``: or it saves its
+        masks elsewhere than in that folder's GeneratedPhasemasks (started by hand, its settings from another install:
+        [mainSettings] rootPath, written in its ini when it starts)."""
+        if not _same_folder(folder, self.config.wfd_root):
+            return (f"Wavefront IV runs from {folder}, not from the Wavefront folder {self.config.wfd_root}: close it "
+                    f"and press Start, or pick {folder} as the Wavefront folder")
+        saved_in = wavefront.read_ini("mainSettings", "rootPath") if saving else None
+        if saved_in and not _same_folder(saved_in, self.config.wfd_output_dir):
+            return (f"Wavefront IV saves its masks in {saved_in}, not in {self.config.wfd_output_dir}: close it and "
+                    f"press Start (Oriole sets where it saves them)")
+        return None
 
     def _show_wavefront(self):
         if not wavefront.SUPPORTED:
@@ -855,20 +913,21 @@ class MainWindow(QtWidgets.QMainWindow):
             text, colour = "Wavefront: starting…", WARN
         elif self.wf_port is False:
             text, colour = "Wavefront: TCP server not reachable", LOG_COLOURS["error"]
-        elif self.wf_runs:
+        elif self.waiting is not None and self.waiting["kind"] == "tick":
+            text, colour = "Wavefront: ticking its Tcp server…", WARN
+        elif self.wf_answers:
             text, colour = f"Wavefront: TCP ✓ (port {self.wf_port})", LOG_COLOURS["info"]
-        elif self.wf_runs is False:
-            text, colour = "Wavefront: masks not saved (Tcp server ticked?)", LOG_COLOURS["error"]
-        elif self.wf_port:
-            text, colour = f"Wavefront: TCP port {self.wf_port} (Tcp server ticked?)", WARN
-        else:
+        elif self.wf_answers is False:
+            text, colour = "Wavefront: no answer (tick Tcp server)", LOG_COLOURS["error"]
+        else:                                           # pinged in a moment
             text, colour = "Wavefront: running", WARN
         self.lbl_wavefront.setText(text)
         self.lbl_wavefront.setStyleSheet(f"color: {colour}; font-weight: bold;")
         self.btn_wavefront.setText("Start" if self.wf_folder is None else "Check")
         self.btn_wavefront.setEnabled(wavefront.SUPPORTED and not (self.wf_started and self.wf_folder is None))
         self.btn_wavefront.setToolTip("start Wavefront IV from the Wavefront folder" if self.wf_folder is None
-                                      else "connect to Wavefront IV's TCP server")
+                                      else "ping Wavefront IV: does it run Oriole's scripts? (if not, its Tcp server "
+                                           "ticked again)")
 
     # ------------------------------------------------------------------ holo: folders
     @property
@@ -969,46 +1028,42 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.computing:
             self.log("Wavefront is still computing the previous masks", "warn")
             return
+        if not self._have_spots() or self._wavefront_problem(saving=True) or not self._wavefront_free():
+            return
         if self.mask_dir is None:
             self.choose_mask_folder()
             if self.mask_dir is None:
                 return
-        out_dir = self.config.wfd_output_dir
-        if not Path(out_dir).is_dir():
+        out_dir, mask_dir = Path(self.config.wfd_output_dir), self.mask_dir
+        if not out_dir.is_dir():
             self.log(f"Wavefront's phase mask folder not found: {out_dir}", "error")
             return
         try:                                            # swept before and after: refused now rather than then
-            for folder in (out_dir, self.mask_dir):
+            for folder in (out_dir, mask_dir):
                 holo.sweep_rule(folder)
         except holo.UnsafeSweep as e:
             self.log(f"not generating: {e}", "error")
             return
-        if not self._have_spots() or self._wavefront_missing(log=True):
-            return
-        if not self._sweep_before_generating():
-            return
-        fits = self._field_fits()
-        if fits is None:
+        fits = self._field_fits()                       # asked before anything is swept: Cancel deletes nothing
+        if fits is None or not self._sweep_before_generating(out_dir, mask_dir):
             return
         cal, d = self.config.holo, self.spin_diam.value()
         spots_um = cal.to_um(self.spots, self.image.shape)
         names = [holo.mask_name(k + 1) for k in range(len(spots_um))]
         self.jobs = [Job(name, holo.mask_script(name, x, y, d), holo.mask_png(out_dir, name), k)
                      for k, (name, (x, y)) in enumerate(zip(names, spots_um))]
-        self.generation = {"spots_px": list(self.spots), "spots_um": spots_um, "diameter": d, "cal": cal,
-                           "fits": fits}
+        self.generation = Generation(list(self.spots), spots_um, d, cal, fits, out_dir, mask_dir)
         self.slm_spot = None                            # Wavefront computes on the SLM: no longer the loaded mask
         self.redraw_spots()
         self.refresh_masks()                            # Generate becomes STOP, Load is disabled
         self._send()
 
-    def _sweep_before_generating(self) -> bool:
+    def _sweep_before_generating(self, out_dir: Path, mask_dir: Path) -> bool:
         """Wavefront's phase mask folder and the session's must hold no mask: a warning says what is left and sweeps
         it if you say so."""
-        out_dir = self.config.wfd_output_dir
         left = []
         for what, folder in (("Wavefront's phase mask folder", out_dir), ("phase mask folder of this session",
-                                                                         self.mask_dir)):
+                                                                         mask_dir)):
             found = holo.oriole_files(folder)
             if found:
                 left.append(f"{what}: {_n(len(found), 'file')} ({_n(len(holo.available_masks(folder)), 'mask')}), "
@@ -1021,7 +1076,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         "\n\nSweep them and generate?", {"sweep": "Sweep and generate"}) is None:
             self.log("not generating: the phase mask folders must be empty", "warn")
             return False
-        done = self._sweep(out_dir, self.mask_dir)
+        done = self._sweep(out_dir, mask_dir)
         if done is None:
             return False
         if done.left:                                   # in use, or written again at once: Wavefront still busy
@@ -1070,60 +1125,186 @@ class MainWindow(QtWidgets.QMainWindow):
             self._abort("STOP pressed", level="warn")
 
     # ------------------------------------------------------------------ holo: Wavefront's scripts
-    def _to_wavefront(self, js: str) -> str | None:
-        """Send a script over TCP: None, or why it could not be (Wavefront's state shown either way)."""
+    # Every script answers once it ran (tcplink), and none is sent before the last one answered (or never will): one
+    # script at a time, as Wavefront needs. A ping (a script doing nothing) says whether it runs Oriole's scripts at
+    # all; when it does not, Oriole ticks its Tcp server with a script dropped in its script folder.
+    @property
+    def script_running(self) -> bool:
+        """A script sent to Wavefront has not answered yet: nothing else is sent meanwhile."""
+        return self.waiting is not None or bool(self.jobs and self.jobs[0].answered is None)
+
+    def _wavefront_free(self) -> bool:
+        """Wavefront can take a script now: none running, and it answers (not known yet: the script's answer will
+        tell). Why not, logged."""
+        if self.script_running:
+            self.log("not now: Wavefront is running Oriole's last script", "warn")
+            return False
+        if self.wf_answers is False:
+            self.log(f"Wavefront IV does not run Oriole's scripts: {tcplink.TCP_HINT} (Oriole checks every "
+                     f"{tcplink.PING_EVERY_S:.0f} s; the state turns green once it does)", "error")
+            return False
+        return True
+
+    def _to_wavefront(self, js: str) -> tuple[int | None, str | None]:
+        """Send a script over TCP: its id, or why it could not be (Wavefront's state shown either way). Its answer
+        is read every 100 ms."""
+        made = self.link.connections
         try:
-            self.link.send(js)
-            port, error = self.link.port, None
+            sid, port, error = self.link.send(js), self.link.port, None
         except tcplink.LinkError as e:
-            port, error = False, str(e)
+            sid, port, error = None, False, str(e)
+        if self.link.connections != made:
+            self.log(f"connected to Wavefront IV's TCP server (port {self.link.port})")
         if port != self.wf_port:
             self.wf_port = port
             self._show_wavefront()
-        return error
+        if sid is not None:
+            self.timer.start()
+        return sid, error
+
+    def _answering(self, yes: bool):
+        """Wavefront answered a script (it runs them), or did not in time."""
+        if yes != self.wf_answers:
+            self.wf_answers = yes
+            self._show_wavefront()
+
+    def ping(self, say: bool = False):
+        """A script doing nothing, to know whether Wavefront runs Oriole's scripts; ``say``: its answer logged."""
+        if self.script_running or self.computing:
+            return
+        self.last_ping = time.time()
+        was_reachable = self.wf_port is not False
+        sid, error = self._to_wavefront("")
+        if error:
+            if say or was_reachable:                    # said once, not at every ping
+                self.log(error, "error")
+            return
+        self.waiting = {"kind": "ping", "sid": sid, "sent": time.time(), "say": say}
+
+    def _tick_tcp_server(self):
+        """Tick Wavefront's Tcp server with a script dropped in its script folder: run if Wavefront is in auto-load
+        mode, as it starts; its answer comes over TCP like any other."""
+        self.tick_tried = True
+        folder = self.wf_folder or Path(self.config.wfd_root)
+        sid, js = self.link.script(tcplink.TICK_JS)
+        try:
+            wavefront.drop_script(folder, js)
+        except OSError as e:
+            self.log(f"Wavefront IV does not run Oriole's scripts, and Oriole cannot tick its Tcp server ({e}): "
+                     f"{tcplink.TCP_HINT}", "error")
+            return
+        self.log("Wavefront IV does not run Oriole's scripts yet: Oriole ticks its Tcp server (a script dropped in its "
+                 "script folder)")
+        self.waiting = {"kind": "tick", "sid": sid, "sent": time.time(), "folder": folder}
+        self.timer.start()
+        self._show_wavefront()
+
+    def _drop_waiting(self):
+        """Forget the script waiting for its answer; the Tcp server tick taken back from the script folder."""
+        w, self.waiting = self.waiting, None
+        if w is not None and w["kind"] == "tick":
+            try:
+                wavefront.take_back_script(w["folder"])
+            except OSError:
+                pass
+
+    def _on_answer(self, kind: str, sid: int, error: str):
+        """An answer from Wavefront: to the ping, Load or tick waiting, or to the mask being computed. Any other is
+        late (a script sent again since, or a generation stopped): nothing to do."""
+        w = self.waiting
+        if w is not None and w["sid"] == sid:
+            self.waiting = None
+            self._answering(True)
+            if w["kind"] == "load":
+                self._loaded(w, kind, error)
+            elif w["kind"] == "tick":
+                self.log(f"Tcp server ticked by Oriole: Wavefront IV runs Oriole's scripts (port {self.wf_port})")
+            elif w["say"]:
+                self.log(f"Wavefront IV runs Oriole's scripts (port {self.wf_port})")
+            self._show_wavefront()
+        elif self.jobs and self.jobs[0].sid == sid and self.jobs[0].answered is None:
+            self._answering(True)
+            job = self.jobs[0]
+            if kind == "ERROR":
+                self._abort(f"Wavefront: the {job.name} script failed ({error})", RESTART_FIX)
+            else:
+                job.answered = time.time()
+
+    def _waiting_too_long(self):
+        """The ping, Load or tick waiting got no answer in time."""
+        w = self.waiting
+        limit = {"ping": tcplink.PING_WAIT_S, "tick": tcplink.TICK_WAIT_S, "load": tcplink.LOAD_WAIT_S}[w["kind"]]
+        if time.time() - w["sent"] < limit:
+            return
+        taken = w["kind"] != "tick" or not wavefront.script_waiting(w["folder"])
+        self._drop_waiting()
+        self._answering(False)
+        if w["kind"] == "load":
+            self.slm_spot = None                        # not known to be loaded: what the SLM shows is unknown
+            self.redraw_spots()
+            self.log(f"{w['name']} not loaded: Wavefront did not answer within {tcplink.LOAD_WAIT_S:.0f} s "
+                     f"({tcplink.TCP_HINT}?)", "error")
+        elif w["kind"] == "tick":
+            why = ("it did not take the script dropped in its script folder (not in auto-load mode)" if not taken
+                   else "it took the script dropped in its script folder, but did not answer")
+            self.log(f"Oriole could not tick Wavefront IV's Tcp server: {why}. {tcplink.TCP_HINT} (Oriole checks "
+                     f"every {tcplink.PING_EVERY_S:.0f} s)", "error")
+        elif not self.tick_tried and wavefront.SUPPORTED:
+            self._tick_tcp_server()
+        elif w["say"]:
+            self.log(f"Wavefront IV does not run Oriole's scripts: {tcplink.TCP_HINT}", "error")
+        self._show_wavefront()
 
     def _send(self):
         """Send the first mask's script; the generation is aborted if it cannot be."""
         job = self.jobs[0]
-        error = self._to_wavefront(job.js)
+        sid, error = self._to_wavefront(job.js)
         if error:
             self._abort(f"cannot send the {job.name} script: {error}", RESTART_FIX)
             return
-        job.sent = time.time()
-        self.timer.start()
+        job.sid, job.sent, job.answered = sid, time.time(), None
         again = f", attempt {job.attempt}/{holo.MAX_ATTEMPTS}" if job.attempt > 1 else ""
-        self.log(f"Wavefront: computing {job.name} ({job.spot + 1} of {len(self.generation['spots_px'])}{again})")
+        self.log(f"Wavefront: computing {job.name} ({job.spot + 1} of {len(self.generation.spots_px)}{again})")
 
     def poll(self):
-        """Every 100 ms: the next mask once Wavefront saved this one (with the right spot); this one again when it did
-        not in time. After an abort, the cleanup; after a generation, its masks stored."""
+        """Every 100 ms: Wavefront's answers; the next mask once this one's script answered and its mask is saved
+        (with the right spot), this one again when it did not answer in time. After an abort, the cleanup; after a
+        generation, its masks stored."""
+        for kind, sid, error in self.link.answers():
+            self._on_answer(kind, sid, error)
+        if self.waiting is not None:
+            self._waiting_too_long()
         if self.cleanup is not None:
             self._clean_up()
-            return
-        if self.storing is not None:
+        elif self.storing is not None:
             self._store_masks()
-            return
-        if not self.jobs:
+        elif self.jobs:
+            self._check_job()
+        if not (self.jobs or self.waiting or self.cleanup or self.storing):
             self.timer.stop()
+
+    def _check_job(self):
+        """The mask being computed: answered and saved, the next one; not answered in time, sent again."""
+        job, now = self.jobs[0], time.time()
+        if job.answered is None:
+            if now - job.sent >= holo.MASK_WAIT_S:
+                self._retry(f"Wavefront did not run the {job.name} script within {holo.MASK_WAIT_S:.0f} s")
             return
-        job = self.jobs[0]
-        if holo.mask_saved(job.png, job.sent):
-            if not self.wf_runs:                        # a mask saved: Wavefront runs the scripts sent over TCP
-                self.wf_runs = True
-                self._show_wavefront()
-            if self._mask_holds_its_spot(job):
-                self._next_job()
-        elif time.time() - job.sent >= holo.MASK_WAIT_S:
-            self._retry(f"Wavefront did not save {job.png.name} within {holo.MASK_WAIT_S:.0f} s of its script")
+        if not holo.mask_saved(job.png, job.sent):
+            if now - job.answered >= holo.SAVE_WAIT_S:
+                self._abort(f"Wavefront ran the {job.name} script but did not save {job.png.name}", RESTART_FIX)
+            return
+        if self._mask_holds_its_spot(job):
+            self._next_job()
 
     def _mask_holds_its_spot(self, job: Job) -> bool:
         """The spot Wavefront drew for the mask is the one asked for, else the generation is aborted. Nothing drawn:
         a big red line only. A spot (partly) outside the field was said at Generate: its mask is not checked."""
         g = self.generation
-        if g["fits"][job.spot] != "in":
+        if g.fits[job.spot] != "in":
             return True
-        (x, y), d = g["spots_um"][job.spot], g["diameter"]
-        drawn = holo.drawn_spot(self.config.wfd_output_dir, job.name, d)
+        (x, y), d = g.spots_um[job.spot], g.diameter
+        drawn = holo.drawn_spot(g.out_dir, job.name, d)
         if drawn is None:
             return True
         if math.isnan(drawn[0]):
@@ -1154,23 +1335,22 @@ class MainWindow(QtWidgets.QMainWindow):
         if now < s["at"] and not final:
             return
         g = s["g"]
-        names = [holo.mask_name(k + 1) for k in range(len(g["spots_px"]))]
-        _, left = holo.store_masks(self.config.wfd_output_dir, self.mask_dir, names)
+        names = [holo.mask_name(k + 1) for k in range(len(g.spots_px))]
+        _, left = holo.store_masks(g.out_dir, g.mask_dir, names)
         if left and now < s["until"] and not final:
             return
         self.storing = None
-        self.timer.stop()
         if left:
-            self.log(f"could not move {_names(left)} into {self.mask_dir} (in use?): they are still in "
-                     f"{self.config.wfd_output_dir}", "error")
-        rec = holo.write_spot_record(self.mask_dir, g["spots_px"], g["spots_um"], g["diameter"], g["cal"])
-        self.log(f"{_n(len(g['spots_px']), 'phase mask')} saved in {self.mask_dir} (spot i = {holo.PREFIX}i, each "
-                 f"checked against its drawn spot; {rec.name})")
+            self.log(f"could not move {_names(left)} into {g.mask_dir} (in use?): they are still in {g.out_dir}",
+                     "error")
+        rec = holo.write_spot_record(g.mask_dir, g.spots_px, g.spots_um, g.diameter, g.cal)
+        self.log(f"{_n(len(g.spots_px), 'phase mask')} saved in {g.mask_dir} (spot i = {holo.PREFIX}i, each checked "
+                 f"against its drawn spot; {rec.name})")
         self.refresh_masks()
 
     def _retry(self, problem: str):
-        """Send the mask's script again, MAX_ATTEMPTS sends in all; then abort the generation. No mask saved since
-        Wavefront started: it does not run the scripts (Tcp server not ticked?)."""
+        """Send the mask's script again (a new script, as Wavefront ignores one identical to the last), MAX_ATTEMPTS
+        sends in all; then abort the generation: Wavefront does not run the scripts (pinged again until it does)."""
         job = self.jobs[0]
         problem += f" (attempt {job.attempt}/{holo.MAX_ATTEMPTS})"
         if job.attempt < holo.MAX_ATTEMPTS:
@@ -1178,14 +1358,13 @@ class MainWindow(QtWidgets.QMainWindow):
             job.attempt += 1
             self._send()
             return
-        if not self.wf_runs:
-            self.wf_runs = False
-            self._show_wavefront()
+        self._answering(False)
         self._abort(problem, NOT_SAVED_FIX)
 
     def _abort(self, reason: str, fix: str = "", level: str = "error"):
-        """Send nothing more; ABORT_WAIT_S later (Wavefront may still be computing) _clean_up sweeps."""
-        self.cleanup = {"at": time.time() + holo.ABORT_WAIT_S, "fix": fix, "level": level, "sweeps": 0, "swept": []}
+        """Send nothing more; ABORT_WAIT_S later (Wavefront may still be computing) _clean_up sweeps its folder."""
+        self.cleanup = {"at": time.time() + holo.ABORT_WAIT_S, "fix": fix, "level": level, "sweeps": 0, "swept": [],
+                        "out_dir": self.generation.out_dir}
         self.jobs, self.generation = [], None
         self.log(f"{reason}: generation aborted; cleaning up in {holo.ABORT_WAIT_S:.0f} s, Wavefront may still be "
                  f"computing", level)
@@ -1201,9 +1380,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if wait and left > 0:
             self.btn_generate.setText(f"CLEANING UP IN {math.ceil(left)} s")
             return
-        done = self._sweep(self.config.wfd_output_dir, report=c["sweeps"] == 0)
+        done = self._sweep(c["out_dir"], report=c["sweeps"] == 0)
         if done is None:                                # refused (logged): nothing more to do
-            self.timer.stop()
             self.cleanup = None
             self.refresh_masks()
             return
@@ -1214,7 +1392,6 @@ class MainWindow(QtWidgets.QMainWindow):
             c["at"] = time.time() + 1                   # not empty yet: again in 1 s
             self.btn_generate.setText("CLEANING UP…")
             return
-        self.timer.stop()
         self.cleanup = None
         fix = f"; {c['fix']}" if c["fix"] else ""
         if still:
@@ -1235,21 +1412,35 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.computing:
             self.log("not now: Wavefront is computing masks", "warn")
             return
-        if self._wavefront_missing(log=True):
-            return
         n = int(self.combo_mask.currentText())
         name = holo.mask_name(n)
-        error = self._to_wavefront(holo.load_script(holo.mask_png(self.mask_dir, name)))
+        png = holo.mask_png(self.mask_dir, name)
+        if not png.is_file():                           # deleted since the list was made
+            self.log(f"{name} not loaded: {png} not found", "error")
+            self.refresh_masks()
+            return
+        if self._wavefront_problem() or not self._wavefront_free():
+            return
+        sid, error = self._to_wavefront(holo.load_script(png))
         if error:
             self.slm_spot = None                        # not loaded: what the SLM shows is unknown
             self.redraw_spots()
             self.log(f"{name} not loaded: {error}", "error")
             return
-        self.log(f"SLM: loading {name}" + ("" if self.wf_runs else " (shown only if Tcp server is ticked in Wavefront)"))
-        self.slm_spot = holo.recorded_spot(self.mask_dir, n)
-        if self.slm_spot is None:
-            self.log(f"{name} is not in an up to date {holo.RECORD_NAME}: its spot cannot be shown on the image",
-                     "warn")
+        self.log(f"SLM: loading {name}")
+        self.waiting = {"kind": "load", "sid": sid, "sent": time.time(), "name": name, "n": n, "folder": self.mask_dir}
+
+    def _loaded(self, w: dict, kind: str, error: str):
+        """A Load answered: done, its spot ringed on the image (where it was clicked); failed, said."""
+        if kind == "ERROR":
+            self.slm_spot = None
+            self.log(f"{w['name']} not loaded: Wavefront's script failed ({error})", "error")
+        else:
+            self.slm_spot = holo.recorded_spot(w["folder"], w["n"])
+            self.log(f"SLM: {w['name']} loaded")
+            if self.slm_spot is None:
+                self.log(f"{w['name']} is not in an up to date {holo.RECORD_NAME}: its spot cannot be shown on the "
+                         f"image", "warn")
         self.redraw_spots()
 
     def open_shutter(self):
@@ -1310,6 +1501,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.save_config()
 
     def _on_wavefront_root(self, root: str):
+        if root == self.config.wfd_root:                # the field left without a change: nothing to check again
+            return
         self.config.wfd_root = root
         self.save_config()
         if not Path(self.config.wfd_output_dir).is_dir():
@@ -1340,6 +1533,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._store_masks(final=True)               # ... and store the masks of a finished generation now
         if self.shutter.is_open:
             self.close_shutter()
+        self._drop_waiting()                            # a Tcp server tick not taken: the script folder as it was
         self.timer.stop()
         self.link.close()
         self.save_config()

@@ -15,21 +15,40 @@ desktop shortcut. The usual **Oriole** shortcut keeps running branch `oriole` fr
 Both share `~/.oriole/config.json` (each ignores the other's extra keys). What differs so far:
 * **Window title and menu:** the title says *Oriole TCP*. A **Wavefront** menu chooses the
   Wavefront Oriole drives over TCP: IV, or V (not ready yet).
-* **Wavefront IV over TCP, no script folder:** every script (each mask of a generation, a Load)
-  goes to Wavefront IV's TCP server (`oriole/tcplink.py`). Oriole TCP never writes to the
-  `script` folder and doesn't touch the auto-load setting (`[scriptEngine] autoload` in
-  `wfdIV.ini`, used by Plerion and by Oriole on `oriole`).
-  * **For now, by hand:** tick *Tools → Script engine → Tcp server* in Wavefront IV after every
-    start; Wavefront doesn't remember it.
+* **Wavefront IV over TCP:** every script (each mask of a generation, a Load) goes to Wavefront
+  IV's TCP server (`oriole/tcplink.py`). Found on the rig (2026-10-25), by reading Wavefront's
+  script plugin and trying it:
   * **The port:** Wavefront opens its server by itself at every start, on a new port written to
     `%TEMP%\blueBoxServer` (IP, then port). Oriole reads it there before connecting, as
-    `arduinoReader` does, and connects again by itself when Wavefront restarts.
+    `arduinoReader` does, and connects again by itself when Wavefront restarts. The file stays
+    after Wavefront closes: a refused connection then means it isn't running.
   * **The message:** a Qt `QDataStream` `QByteArray`, as captured from `arduinoReader`: the length
-    (4 bytes, big-endian), then the UTF-8 JavaScript, the same as a `test.js`. Wavefront answers
-    nothing.
-  * **Knowing that scripts run:** the server listens from the start, whether *Tcp server* is
-    ticked or not, so a connection proves nothing. The first mask saved does: the state then reads
-    *TCP ✓*. A generation whose first mask is never saved ends with "Tcp server ticked?".
+    (4 bytes, big-endian), then the UTF-8 JavaScript, the same as a `test.js`.
+  * **A message identical to the previous one is ignored.** Wavefront's server keeps the last
+    message and passes it on only when it changes. That's why retries never worked and why a
+    script swallowed before the tick seemed to block everything after it. So every script carries
+    an id of its own, and sending the same mask (or Load) twice really sends it twice.
+  * **Wavefront answers.** The script object (`scriptEngine` in JavaScript) holds the TCP server,
+    whose `broadcastMessage` sends a `QString` back to every connected client. Every Oriole script
+    ends with `ORIOLE DONE <id>`, or `ORIOLE ERROR <id> <error>` with Wavefront's own message.
+  * **One script at a time:** the next script goes only once the last one answered (or a timeout
+    said it never will). Scripts go on one kept connection, so Wavefront runs them one after the
+    other. A script arriving on another connection while one ran crashed Wavefront three times in
+    `QtScript4.dll`.
+  * **Tcp server, ticked by Oriole:** Wavefront runs TCP scripts only with *Tools → Script engine →
+    Tcp server* ticked, which it doesn't remember. It starts in auto-load mode (`[scriptEngine]
+    autoload=true` in `wfdIV.ini`, which Start sets; Plerion and Oriole on `oriole` need it too).
+    So once Wavefront is ready, Oriole pings it (an empty script). If there's no answer within 2 s,
+    Oriole drops a one-line script in its `script` folder that clicks the *Tcp server* checkbox
+    (`scriptEngine.getUi()` is the Script engine dialog), and the answer comes back over TCP. On
+    the rig it was ticked 0.1 s later. If it can't be done (no `script` folder, Wavefront not in
+    auto-load mode), the log says to tick it by hand, the script dropped is taken back, and Oriole
+    pings every 3 s until Wavefront answers.
+  * **The state:** *TCP ✓*, in green, once Wavefront answered. *no answer (tick Tcp server)* in
+    red otherwise, and Generate and Load then say so at once.
+  * **The journal:** every line of the log is also written, dated, to
+    `~/.oriole/oriole-tcp-journal.log` (kept aside as `.old` past 5 MB), to read again after a
+    problem on the rig.
 * **Phase masks of this session:**
   * **Asked at the first Generate:** nothing opens when Oriole starts. The first **GENERATE PHASE
     MASKS** of a session asks for the folder of the experiment, then goes on. The dialog opens on
@@ -42,13 +61,21 @@ Both share `~/.oriole/config.json` (each ignores the other's extra keys). What d
   * **How masks get there:** Wavefront IV can't be told by script where to save, so it still saves
     each mask in its `GeneratedPhasemasks`. Oriole moves the checked masks (the 6 files of each)
     into the session's folder once the generation is done, then writes `Pattern_spots.json` there.
+    Both folders are fixed when a generation starts: a folder changed meanwhile applies to the next.
+  * **Wavefront opened by hand:** it has to run from the Wavefront folder and save its masks in that
+    folder's `GeneratedPhasemasks` (`[mainSettings] rootPath` in `wfdIV.ini`, which it writes when
+    it starts). If it doesn't, Generate says so and sends nothing, instead of waiting for masks
+    that land somewhere else. Load doesn't depend on it, since it names its file.
   * **Plerion** still reads masks from `GeneratedPhasemasks`, so it doesn't follow this version yet.
 * **Brooms** accept a `GeneratedPhasemasks` folder (in a Wavefront install) or a `Phasemasks`
   folder, with the same allow-list (`Pattern<n>_000.*`, `Pattern_spots.json`): Plerion's order
   files, for instance, are never deleted. A `script` folder is never swept.
 * **Still to come:** Wavefront V over TCP (port in `%APPDATA%\idv-photonics\wfdV\tcpPort.txt`; a
   message is a magic number `0xABCDEF88`, then a length, the command and a CRC-16, as in Plerion's
-  `pythonToWfdVTcpCom.py`), then switching each Wavefront's TCP server on by itself.
+  `pythonToWfdVTcpCom.py`). Maybe Wavefront IV saving straight into the session's folder: its
+  `mainSettings.setCurrentFolder(QString)` isn't reachable from scripts, but one line in
+  `invoke.xml` (inside `wfdIV.cfg`, a plain zip the launcher unpacks to TEMP at every start) would
+  make it so.
 
 ## Install / run
 
@@ -207,8 +234,7 @@ its *Tcp server*. As tried on the rig, Wavefront reads its settings, shared by e
 `%APPDATA%\wfdIV\wfdIV.ini` when it starts: Oriole sets `[mainSettings] rootPath` (the folder masks
 are saved in: this install's `GeneratedPhasemasks`) there first, every other line left as it is.
 The line under the folder says Wavefront's state (checked every second): not running, starting…,
-running, *TCP port n (Tcp server ticked?)* (its server reached, no mask saved yet), *TCP ✓* (a mask
-saved over TCP), *masks not saved (Tcp server ticked?)*, *TCP server not reachable*, or *another
+running, *TCP ✓ (port n)* (its server reached, in green), *TCP server not reachable*, or *another
 install* (it runs from another folder: an error in the log, Generate and Load refused). Once it is
 ready (its window open) Oriole connects to its TCP server (**Check** does it again). A core that is
 empty or missing (licence), a missing `GeneratedPhasemasks` folder, or a Wavefront that does not
@@ -231,7 +257,8 @@ big bold red line in the log; their masks hold no spot, or a cut one, and are no
 in `oriole/holo.py` (`FIELD_HALF_UM`, `EFFICIENCY_RADII_UM`, `CROSS_HALF_UM`).
 
 **Manual**: pick a mask number (the `Pattern<n>` found in the phase mask folder) and *Load* it
-onto the SLM, over TCP (Wavefront answers nothing; not reachable: not loaded, said in red). Its spot
+onto the SLM, over TCP: loaded once Wavefront answered (no answer within 5 s, an error, or not
+reachable: not loaded, said in red). Its spot
 gets a purple *SLM* ring on the image, where it was clicked (read from `Pattern_spots.json`; a
 mask with no record there, or made again since, e.g. by DHgui, is loaded without a ring). *Open* /
 *Close* drive the shutter (NI-DAQ output from the holo *Settings*, `Dev1/ao0` by default;

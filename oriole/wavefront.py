@@ -7,9 +7,10 @@ Errorcode 7536725.pdf" on the desktop).
 
 Every install shares the settings in %APPDATA%\\wfdIV\\wfdIV.ini (a QSettings ini file), read when Wavefront starts
 and written when it starts and exits. As tried on the rig, ``[mainSettings] rootPath`` there is the folder it saves
-the masks in: set before Oriole starts it. Its script source (Tools → Script engine) is not set: Oriole TCP needs "Tcp
-server", which Wavefront does not remember (ticked by hand); ``[scriptEngine] autoload`` (the script folder, for
-Plerion and Oriole's script version) is left as it is. Closing Wavefront asks to confirm: Oriole never does.
+the masks in, and ``[scriptEngine] autoload`` makes it start running the scripts dropped in its ``script`` folder (as
+Plerion and Oriole's script version need): both set before Oriole starts it. Its "Tcp server", which Oriole TCP needs,
+is not remembered: Oriole ticks it with a script dropped in that folder (drop_script). Closing Wavefront asks to
+confirm: Oriole never does.
 """
 from __future__ import annotations
 
@@ -125,8 +126,44 @@ def write_ini(values: dict[tuple[str, str], str], path=None) -> list[str]:
 
 
 def prepare(folder, path=None) -> list[str]:
-    """Before starting Wavefront from ``folder``: masks saved in its GeneratedPhasemasks folder."""
-    return write_ini({("mainSettings", "rootPath"): str(Path(folder) / "GeneratedPhasemasks")}, path)
+    """Before starting Wavefront from ``folder``: scripts taken from its script folder (where Oriole ticks its Tcp
+    server), masks saved in its GeneratedPhasemasks folder."""
+    return write_ini({("scriptEngine", "autoload"): "true",
+                      ("mainSettings", "rootPath"): str(Path(folder) / "GeneratedPhasemasks")}, path)
+
+
+# ----------------------------------------------------------------------------- script folder
+SCRIPT_DIR = "script"               # in the install: Wavefront runs test.js once an empty zdone.js follows it
+SCRIPT_NAME, TRIGGER_NAME = "test.js", "zdone.js"
+
+
+def drop_script(folder, js: str) -> Path:
+    """Have Wavefront (started from ``folder``, in auto-load mode) run ``js``: test.js, then the empty zdone.js that
+    starts it; Wavefront removes both. The script folder, or OSError (no folder, a script still waiting there)."""
+    script_dir = Path(folder) / SCRIPT_DIR
+    if not script_dir.is_dir():
+        raise FileNotFoundError(f"no {SCRIPT_DIR} folder in {folder}")
+    if (script_dir / SCRIPT_NAME).exists():
+        raise FileExistsError(f"{script_dir / SCRIPT_NAME} is still waiting there")
+    part = script_dir / (SCRIPT_NAME + ".part")
+    part.write_text(js, encoding="utf-8")       # written whole, then renamed: never read half written
+    os.replace(part, script_dir / SCRIPT_NAME)
+    (script_dir / TRIGGER_NAME).write_text("")
+    return script_dir
+
+
+def script_waiting(folder) -> bool:
+    """A script dropped in the script folder of ``folder`` is not taken yet."""
+    return any((Path(folder) / SCRIPT_DIR / name).exists() for name in (SCRIPT_NAME, TRIGGER_NAME))
+
+
+def take_back_script(folder):
+    """Remove a script Wavefront did not take (not in auto-load mode): the folder left as it was."""
+    for name in (SCRIPT_NAME, TRIGGER_NAME, SCRIPT_NAME + ".part"):
+        try:
+            (Path(folder) / SCRIPT_DIR / name).unlink()
+        except FileNotFoundError:
+            pass
 
 
 # ----------------------------------------------------------------------------- running processes
