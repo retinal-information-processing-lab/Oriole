@@ -10,6 +10,7 @@ import datetime as _dt
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,8 @@ FIELD_HALF_UM = 187.8
 EFFICIENCY_RADII_UM = {90: 47.0, 80: 68.4, 70: 86.3, 60: 103.0, 50: 119.6, 40: 137.0, 30: 156.2, 20: 179.0}
 CROSS_HALF_UM = 18.0
 MAX_SWEEPS = 10                     # sweeps of the Wavefront folders after an abort, while a file is left
+STORE_SETTLE_S = 1.0                # masks moved to the session folder this long after the last one is saved
+STORE_WAIT_S = 10.0                 # ... and again while one of their files is in use, this long at most
 ABORT_WAIT_S = 2.0                 # after an abort Wavefront may still be computing: sweep only after this long
 
 
@@ -114,26 +117,29 @@ class UnsafeSweep(RuntimeError):
     """A folder Oriole refuses to sweep: nothing is deleted."""
 
 
-# The only folders a sweep may touch, by name, and the only files it may delete there: what Wavefront and Oriole write
-SWEEPABLE = {"generatedphasemasks": re.compile(rf"^({PREFIX}\d+_000\.[\w.]+|{re.escape(RECORD_NAME)})$"),
-             "script": re.compile(r"^[^.][^\\/]*\.js(\.part)?$")}
-INSTALL_MARK = "wfdIV.exe"          # both lie in a Wavefront install, next to its launcher
+# The only folders a sweep may touch, by name, and the only files it may delete there: what Wavefront and Oriole
+# write. Wavefront's own folders must lie in its install; Phasemasks is the session folder Oriole made.
+MASK_FILES = re.compile(rf"^({PREFIX}\d+_000\.[\w.]+|{re.escape(RECORD_NAME)})$")
+SWEEPABLE = {"generatedphasemasks": (MASK_FILES, True), "script": (re.compile(r"^[^.][^\\/]*\.js(\.part)?$"), True),
+             "phasemasks": (MASK_FILES, False)}
+SESSION_FOLDER = "Phasemasks"       # made inside the folder chosen for the experiment: the masks of the session
+INSTALL_MARK = "wfdIV.exe"          # Wavefront's folders lie in its install, next to its launcher
 
 
 def sweep_rule(folder) -> re.Pattern:
     """The files a sweep may delete in ``folder``. UnsafeSweep unless ``folder`` is an existing script or
-    GeneratedPhasemasks folder of a Wavefront install, and not a drive root nor a link."""
+    GeneratedPhasemasks folder of a Wavefront install, or a Phasemasks folder, and not a drive root nor a link."""
     p = Path(folder)
-    rule = SWEEPABLE.get(p.name.lower())
+    rule, in_install = SWEEPABLE.get(p.name.lower(), (None, False))
     if not p.is_dir():
         raise UnsafeSweep(f"{p} is not an existing folder")
     if rule is None:
-        raise UnsafeSweep(f"{p} is not a script or GeneratedPhasemasks folder")
+        raise UnsafeSweep(f"{p} is not a script, GeneratedPhasemasks or {SESSION_FOLDER} folder")
     if os.path.ismount(p) or p.parent == p:
         raise UnsafeSweep(f"{p} is a drive root")
     if p.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(p):
         raise UnsafeSweep(f"{p} is a link to another folder")
-    if not (p.parent / INSTALL_MARK).is_file():
+    if in_install and not (p.parent / INSTALL_MARK).is_file():
         raise UnsafeSweep(f"{p} is not in a Wavefront install (no {INSTALL_MARK} next to it)")
     return rule
 
@@ -177,6 +183,25 @@ def sweep(*folders) -> Swept:
                 pass
     done.left = [p for folder, rule in rules for p in _plain_files(folder) if rule.match(p.name)]
     return done
+
+
+def store_masks(source, dest, names) -> tuple[list[str], list[Path]]:
+    """Move every file of the masks ``names`` (<name>_000.*) from ``source`` to ``dest``, replacing what is there:
+    the names moved, and the files left (still in use)."""
+    moved, left = [], []
+    for name in names:
+        for p in sorted(Path(source).glob(f"{name}_000.*"), key=natural_key):
+            target = Path(dest) / p.name
+            try:
+                try:
+                    os.replace(p, target)
+                except OSError:                     # another drive: copied, then removed
+                    shutil.copy2(p, target)
+                    p.unlink()
+                moved.append(p.name)
+            except OSError:
+                left.append(p)
+    return moved, left
 
 
 def file_dates(paths) -> str:

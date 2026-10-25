@@ -94,7 +94,7 @@ def test_sweep_guards(tmp_path, monkeypatch):
     lonely = tmp_path / "elsewhere" / "script"  # no wfdIV.exe next to it
     lonely.mkdir(parents=True)
     for bad, why in ((tmp_path / "nope", "is not an existing folder"),
-                     (install, "is not a script or GeneratedPhasemasks folder"),
+                     (install, "is not a script, GeneratedPhasemasks or Phasemasks folder"),
                      (lonely, "is not in a Wavefront install (no wfdIV.exe next to it)")):
         with pytest.raises(UnsafeSweep, match=re.escape(why)):
             sweep(masks, bad)
@@ -159,3 +159,23 @@ def test_recorded_spot(tmp_path):
     assert recorded_spot(tmp_path, 1) is None
     rec.write_text("{not json")
     assert recorded_spot(tmp_path, 2) is None
+
+
+def test_session_folder_sweeps_and_stored_masks(tmp_path):
+    from oriole.holo import store_masks
+    staging, session = tmp_path / "wfdIV_x" / "GeneratedPhasemasks", tmp_path / "experiment" / "Phasemasks"
+    staging.mkdir(parents=True)
+    session.mkdir(parents=True)                         # no Wavefront install around it: Oriole's own folder
+    for name in ("Pattern1_000.algoPhp.png", "Pattern1_000.rawSrc.png", "Pattern1_000.xml", "Pattern2_000.slm.png",
+                 "Pattern12_000.algoPhp.png", "other_000.png"):
+        (staging / name).write_bytes(b"x")
+    (session / "Pattern1_000.xml").write_bytes(b"old")
+    moved, left = store_masks(staging, session, ["Pattern1", "Pattern2"])
+    assert moved == ["Pattern1_000.algoPhp.png", "Pattern1_000.rawSrc.png", "Pattern1_000.xml",
+                     "Pattern2_000.slm.png"] and left == []
+    assert (session / "Pattern1_000.xml").read_bytes() == b"x"      # replaced
+    assert sorted(p.name for p in staging.iterdir()) == ["Pattern12_000.algoPhp.png", "other_000.png"]
+    (session / "PhaseMasksOrder.txt").write_text("Plerion's")       # a Plerion-like file: never swept
+    done = sweep(session)
+    assert len(done.swept) == 4 and [p.name for p in done.foreign] == ["PhaseMasksOrder.txt"]
+    assert sorted(p.name for p in session.iterdir()) == ["PhaseMasksOrder.txt"]

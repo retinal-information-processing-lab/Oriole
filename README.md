@@ -8,6 +8,36 @@ Power is always 100 % (no intensity modulation). Protocols run in Plerion.
 
 Formerly named **Aule**: the settings in `~/.aule/config.json` are picked up on first start.
 
+## Oriole TCP (branch `tcp`, in progress)
+
+This branch is checked out in `E:\Oriole-tcp` (a git worktree) and started from the **Oriole TCP**
+desktop shortcut. The usual **Oriole** shortcut keeps running branch `oriole` from `E:\Oriole`.
+Both share `~/.oriole/config.json` (each ignores the other's extra keys). What differs so far:
+* **Window title and menu:** the title says *Oriole TCP*. A **Wavefront** menu chooses the
+  Wavefront Oriole drives: IV, through its script folder as on `oriole`, or V, over TCP (not ready
+  yet).
+* **Phase masks of this session:**
+  * **Chosen at every start:** when Oriole opens, it asks for the folder of the experiment. The
+    dialog opens on the experiment drive (`experiment_drive`, `D:\` by default), and Oriole makes a
+    `Phasemasks` folder in it; a chosen folder already named so is used as it is. Nothing is
+    remembered between runs.
+  * **Needed by:** Generate, Load, and that folder's 🧹 and 📂. **…** chooses another.
+  * **How masks get there:** Wavefront IV can't be told by script where to save, so it still saves
+    each mask in its `GeneratedPhasemasks`. Oriole moves the checked masks (the 6 files of each)
+    into the session's folder once the generation is done, then writes `Pattern_spots.json` there.
+  * **Plerion** still reads masks from `GeneratedPhasemasks`, so it doesn't follow this version yet.
+* **Brooms** also accept a `Phasemasks` folder, with the same allow-list (`Pattern<n>_000.*`,
+  `Pattern_spots.json`): Plerion's order files, for instance, are never deleted.
+* **TCP, found on the rig so far:**
+  * **Wavefront IV:** it opens a TCP server by itself at every start, on a new port written to
+    `%TEMP%\blueBoxServer` (IP, then port). That's how `arduinoReader` finds it. Its script panel
+    runs scripts from one source at a time (*Simple file*, *auto-load*, *Tcp server*), and only
+    auto-load is remembered. With *Tcp server* selected, the messages sent so far weren't run; the
+    exact message format of `arduinoReader` is still to be captured.
+  * **Wavefront V:** port in `%APPDATA%\idv-photonics\wfdV\tcpPort.txt`. A message is a magic
+    number `0xABCDEF88`, then a length, the command and a CRC-16 (Plerion's
+    `pythonToWfdVTcpCom.py`). Still to be tried on the rig.
+
 ## Install / run
 
 Windows: double-click **`Oriole.vbs`** (no console window at all; a desktop shortcut to it works

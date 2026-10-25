@@ -32,6 +32,7 @@ from .widgets import (CalibrationBox, FolderEdit, ImageView, action_button, butt
                       spin_box, title_label)
 
 LOG_PATH = DEFAULT_CONFIG_PATH.parent / "oriole.log"   # tracebacks of internal errors
+TITLE = "Oriole TCP"        # this version (branch tcp): a Wavefront menu, the session's phase mask folder
 AUTOLOAD_HINT = 'check that "Tools → Script engine → auto load (script folder)" is selected in Wavefront'
 NOT_TAKEN_FIX = f"{AUTOLOAD_HINT}, or restart Wavefront IV"
 NOT_SAVED_FIX = "restart Wavefront IV and generate again"
@@ -59,12 +60,17 @@ spot and 2(i−1)+1 its negative; a <code>.json</code> lists the frames.<br>
 <b>Merge into bin…</b> appends it to a linked bin (inputs untouched; <code>.indices.json</code> gives the
 new frame numbers).</p>
 <h3>Holo · SLM</h3>
-<p><b>Wavefront folder</b>: the Wavefront IV install (<code>wfdIV.exe</code>); scripts go to its
-<code>script\\</code>, masks are read from its <code>GeneratedPhasemasks\\</code>; 🧹 sweeps a folder clean (only the files
+<p><b>Oriole TCP</b> (this version): the <b>Wavefront</b> menu chooses the Wavefront Oriole drives (IV through its
+script folder; V over TCP, not ready yet). The masks of a session go to <b>phase masks of this session</b>: when
+Oriole opens it asks for the folder of the experiment (the dialog opens on {Config.experiment_drive}) and makes a
+<code>{holo.SESSION_FOLDER}</code> folder in it (one already named so is used as it is). Generate, Load and its 🧹 and 📂 wait
+for it; <b>…</b> chooses another. Wavefront still saves each mask in its own <code>GeneratedPhasemasks\\</code>, and Oriole
+moves the checked masks into the session's folder once the generation is done.<br>
+<b>Wavefront folder</b>: the Wavefront IV install (<code>wfdIV.exe</code>); scripts go to its
+<code>script\\</code>; 🧹 sweeps a folder clean (only the files
 Wavefront and Oriole write there, <code>Pattern&lt;n&gt;_000.*</code>, <code>Pattern_spots.json</code>, <code>*.js</code>; anything else
-is left alone, and a folder that is not a <code>script</code> or <code>GeneratedPhasemasks</code> folder of a Wavefront install is
-never swept), 📂 opens
-the phase mask folder in the file explorer. After a new install (its licence expired: the <b>?</b> next to it
+is left alone, and a folder that is not a <code>script</code> or <code>GeneratedPhasemasks</code> folder of a Wavefront install, or a
+<code>{holo.SESSION_FOLDER}</code> folder, is never swept). After a new install (its licence expired: the <b>?</b> next to it
 says how), pick its folder.<br>
 Under it, Wavefront's state. <b>Start</b> starts it from that folder in script mode (set in its settings,
 <code>%APPDATA%\\wfdIV\\wfdIV.ini</code>, with the folder it saves masks in); Oriole does so itself when it opens
@@ -177,6 +183,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.jobs: list[Job] = []                       # for Wavefront, the first one sent: masks, a Load or a check
         self.generation: dict | None = None             # the spots of the masks being generated
         self.cleanup: dict | None = None                # after an abort: both folders swept once Wavefront is done
+        self.storing: dict | None = None                # a generation done: its masks moved into the session folder
+        self.mask_dir: Path | None = None               # this session's Phasemasks folder, chosen at every start
         self.wf_folder: Path | None = None              # install the running Wavefront started from
         self.wf_ready = False                           # its window is open: it takes scripts (in script mode)
         self.wf_mode: bool | None = None                # in script mode, as last seen (None: not known)
@@ -195,7 +203,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wf_check.setSingleShot(True)
         self.wf_check.setInterval(2000)
         self.wf_check.timeout.connect(self._check_when_idle)
-        self.setWindowTitle("Oriole")
+        self.setWindowTitle(TITLE)
         self.resize(1500, 900)
         self._build()
         self.redraw_spots()
@@ -208,9 +216,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.wf_timer.start()
             if config.start_wavefront and self.wf_folder is None:
                 QtCore.QTimer.singleShot(0, self.start_wavefront)
+        self.ask_mask_folder = QtCore.QTimer(self)      # the session's phase mask folder, asked first thing
+        self.ask_mask_folder.setSingleShot(True)
+        self.ask_mask_folder.timeout.connect(self.choose_mask_folder)
+        self.ask_mask_folder.start(0)
 
     # ------------------------------------------------------------------ layout
     def _build(self):
+        self._build_menu()
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         root = QtWidgets.QVBoxLayout(central)
@@ -230,6 +243,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.watcher = QtCore.QFileSystemWatcher(self)        # mask list and button follow the folders
         self.watcher.directoryChanged.connect(lambda _: self.refresh_masks())
         self._watch_folders()
+
+    def _build_menu(self):
+        """Wavefront: which one Oriole drives (IV through its script folder; V over TCP, not ready yet)."""
+        menu = self.menuBar().addMenu("Wavefront")
+        group = QtGui.QActionGroup(self)
+        self.wavefront_actions = {}
+        for key, text in (("IV", "Wavefront IV (script folder)"), ("V", "Wavefront V (TCP): not ready yet")):
+            action = QtGui.QAction(text, self, checkable=True)
+            action.setChecked(self.config.wavefront == key)
+            action.setEnabled(key != "V")
+            action.triggered.connect(lambda _=False, k=key: self._on_wavefront_choice(k))
+            group.addAction(action)
+            menu.addAction(action)
+            self.wavefront_actions[key] = action
+        if self.config.wavefront != "IV":               # V chosen in a later version: IV until it is ready
+            self.config.wavefront = "IV"
+            self.wavefront_actions["IV"].setChecked(True)
+
+    def _on_wavefront_choice(self, key: str):
+        self.config.wavefront = key
+        self.save_config()
+        self.log(f"Wavefront {key} chosen")
 
     def _build_visual(self) -> QtWidgets.QVBoxLayout:
         col = QtWidgets.QVBoxLayout()
@@ -320,10 +355,16 @@ class MainWindow(QtWidgets.QMainWindow):
         box.addLayout(row)
         self.btn_sweep_scripts = icon_button("🧹", self.sweep_script_folder, "Sweep the script folder clean")
         self.lbl_script_dir = self._folder_row(box, "script folder", self.btn_sweep_scripts)
+        self.btn_choose_masks = button("…", self.choose_mask_folder, "Choose the folder of this experiment: the "
+                                                                     "masks go to the Phasemasks folder made in it",
+                                       "padding: 4px 0;")
+        self.btn_choose_masks.setFixedWidth(30)
         self.btn_open_masks = icon_button("📂", self.open_mask_folder, "Open it in the file explorer")
         self.btn_sweep_masks = icon_button("🧹", self.sweep_mask_folder, "Sweep the phase mask folder clean (asks "
                                                                          "first)")
-        self.lbl_output_dir = self._folder_row(box, "phase mask folder", self.btn_open_masks, self.btn_sweep_masks)
+        self.lbl_output_dir = self._folder_row(box, "phase masks of this session", self.btn_choose_masks,
+                                               self.btn_open_masks, self.btn_sweep_masks)
+        self.lbl_output_dir.setPlaceholderText("not set: … chooses the experiment folder")
         self._show_wavefront_dirs()
         row = QtWidgets.QHBoxLayout()
         row.addWidget(QtWidgets.QLabel("shutter"))
@@ -397,10 +438,43 @@ class MainWindow(QtWidgets.QMainWindow):
         return path
 
     def _show_wavefront_dirs(self):
-        for edit, folder in ((self.lbl_script_dir, self.config.wfd_script_dir),
-                             (self.lbl_output_dir, self.config.wfd_output_dir)):
+        masks = "" if self.mask_dir is None else str(self.mask_dir)
+        for edit, folder in ((self.lbl_script_dir, self.config.wfd_script_dir), (self.lbl_output_dir, masks)):
             edit.setText(folder)            # cursor at the end: the sub-folder name stays visible
             edit.setToolTip(folder)
+        for btn in (self.btn_open_masks, self.btn_sweep_masks):
+            btn.setEnabled(self.mask_dir is not None)
+
+    def choose_mask_folder(self):
+        """The folder of this experiment, asked at every start (the dialog opens on the experiment drive): its
+        Phasemasks folder, made if needed, holds this session's masks."""
+        if self.computing:
+            self.log("not now: Wavefront is computing masks", "warn")
+            return
+        start = str(self.mask_dir.parent) if self.mask_dir else self.config.experiment_drive
+        chosen = QtWidgets.QFileDialog.getExistingDirectory(
+            self, f"Folder of this experiment (its {holo.SESSION_FOLDER} folder will hold the phase masks)", start)
+        if chosen:
+            self.set_mask_folder(chosen)
+        elif self.mask_dir is None:
+            self.log("no phase mask folder for this session: Generate, Load and the mask broom wait for one (… next "
+                     "to 'phase masks of this session')", "warn")
+
+    def set_mask_folder(self, chosen):
+        chosen = Path(chosen)
+        folder = chosen if chosen.name.lower() == holo.SESSION_FOLDER.lower() else chosen / holo.SESSION_FOLDER
+        try:
+            folder.mkdir(exist_ok=True)
+        except OSError as e:
+            self.log(f"cannot make {folder}: {e}", "error")
+            return
+        self.mask_dir = folder
+        masks = holo.available_masks(folder)
+        self.log(f"phase masks of this session: {folder}" + (f" (already {_n(len(masks), 'mask')} there)" if masks
+                                                             else ""))
+        self._show_wavefront_dirs()
+        self._watch_folders()
+        self.refresh_masks()
 
     def show_help(self):
         self._show_page("Oriole help", HELP_HTML, (620, 640))
@@ -796,8 +870,8 @@ class MainWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ holo: folders
     @property
     def computing(self) -> bool:
-        """A generation running, or its cleanup: the Wavefront folders are Wavefront's."""
-        return self.generation is not None or self.cleanup is not None
+        """A generation running, its masks being stored, or its cleanup: the Wavefront folders are Wavefront's."""
+        return self.generation is not None or self.cleanup is not None or self.storing is not None
 
     def _wavefront_folders(self) -> tuple[str, str]:
         return self.config.wfd_script_dir, self.config.wfd_output_dir
@@ -844,7 +918,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.computing:
             self.log("not now: Wavefront is saving masks in that folder", "warn")
             return
-        folder = self.config.wfd_output_dir
+        if self.mask_dir is None:
+            self.log("no phase mask folder yet: … chooses it", "warn")
+            return
+        folder = self.mask_dir
         try:
             holo.sweep_rule(folder)
         except holo.UnsafeSweep as e:
@@ -867,7 +944,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.refresh_masks()
 
     def open_mask_folder(self):
-        folder = Path(self.config.wfd_output_dir)
+        folder = self.mask_dir
+        if folder is None:
+            self.log("no phase mask folder yet: … chooses it", "warn")
+            return
         if not folder.is_dir():
             self.log(f"folder not found: {folder}", "warn")
             return
@@ -876,24 +956,32 @@ class MainWindow(QtWidgets.QMainWindow):
     def _watch_folders(self):
         if self.watcher.directories():
             self.watcher.removePaths(self.watcher.directories())
-        for folder in self._wavefront_folders():
-            if Path(folder).is_dir():
-                self.watcher.addPath(folder)
+        for folder in (*self._wavefront_folders(), self.mask_dir):
+            if folder is not None and Path(folder).is_dir():
+                self.watcher.addPath(str(folder))
 
     def refresh_masks(self):
-        """Mask numbers found in the phase mask folder, and the Generate button: STOP while generating, locked while
-        cleaning up after an abort, yellow while a Wavefront folder holds files that are not Oriole's own script."""
+        """Mask numbers found in the session's phase mask folder, and the Generate button: STOP while generating,
+        locked while cleaning up after an abort or storing the masks, yellow while a folder holds masks or scripts (or
+        no phase mask folder is chosen yet)."""
         current = self.combo_mask.currentText()
         self.combo_mask.clear()
-        self.combo_mask.addItems([str(n) for n in holo.available_masks(self.config.wfd_output_dir)])
+        if self.mask_dir is not None:
+            self.combo_mask.addItems([str(n) for n in holo.available_masks(self.mask_dir)])
         self.combo_mask.setCurrentText(current)         # kept when still there
         self.btn_load_mask.setEnabled(self.combo_mask.count() > 0 and not self.computing)
-        self.btn_generate.setEnabled(self.cleanup is None)
+        self.btn_generate.setEnabled(self.cleanup is None and self.storing is None)
         if self.cleanup is not None:                    # _clean_up counts the seconds down
             state = ("CLEANING UP…", STOP_STYLE, "waiting for Wavefront to finish before sweeping")
+        elif self.storing is not None:
+            state = ("SAVING THE MASKS…", STOP_STYLE, "moving them into the phase mask folder of this session")
         elif self.generation is not None:
             state = ("■ STOP", STOP_STYLE, "stop the generation (both Wavefront folders are emptied after it)")
-        elif not self.jobs and any(holo.oriole_files(folder) for folder in self._wavefront_folders()):
+        elif self.mask_dir is None:
+            state = ("CHOOSE A PHASE MASK FOLDER", BLOCKED_STYLE, "the folder of this experiment: its Phasemasks "
+                                                                  "folder will hold the masks")
+        elif not self.jobs and any(holo.oriole_files(folder) for folder in (*self._wavefront_folders(),
+                                                                             self.mask_dir)):
             state = ("GENERATE PHASE MASKS", BLOCKED_STYLE, "a Wavefront folder is not empty: Generate asks to sweep it")
         else:
             state = ("GENERATE PHASE MASKS", ACTION_STYLE, "")
@@ -907,12 +995,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.computing:
             self.log("Wavefront is still computing the previous masks", "warn")
             return
+        if self.mask_dir is None:
+            self.choose_mask_folder()
+            if self.mask_dir is None:
+                return
         script_dir, out_dir = self._wavefront_folders()
         if not Path(out_dir).is_dir() or not Path(script_dir).is_dir():
             self.log(f"Wavefront folders not found ({script_dir}, {out_dir})", "error")
             return
-        try:                                            # an abort sweeps them: refused now rather than then
-            for folder in (script_dir, out_dir):
+        try:                                            # swept before and after: refused now rather than then
+            for folder in (script_dir, out_dir, self.mask_dir):
                 holo.sweep_rule(folder)
         except holo.UnsafeSweep as e:
             self.log(f"not generating: {e}", "error")
@@ -940,24 +1032,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self._send()
 
     def _sweep_before_generating(self) -> bool:
-        """Both Wavefront folders must be empty: a warning says what is left and sweeps it if you say so."""
+        """The Wavefront folders and the session's phase mask folder must hold no mask nor script: a warning says what
+        is left and sweeps it if you say so."""
         script_dir, out_dir = self._wavefront_folders()
         scripts, files = holo.oriole_files(script_dir), holo.oriole_files(out_dir)
-        if not scripts and not files:
+        masks = holo.oriole_files(self.mask_dir)
+        if not scripts and not files and not masks:
             return True
         left = []
         if scripts:
             left.append(f"script folder: {_names(scripts)} (not taken by Wavefront: is auto load on?)")
-        if files:
-            left.append(f"phase mask folder: {_n(len(files), 'file')} "
-                        f"({_n(len(holo.available_masks(out_dir)), 'mask')}), dated {holo.file_dates(files)}")
+        for what, folder, found in (("Wavefront's phase mask folder", out_dir, files),
+                                    ("phase mask folder", self.mask_dir, masks)):
+            if found:
+                left.append(f"{what}: {_n(len(found), 'file')} ({_n(len(holo.available_masks(folder)), 'mask')}), "
+                            f"dated {holo.file_dates(found)}")
         self.log(f"Wavefront folders not empty: {'; '.join(left)}", "warn")
         if self._choose("Wavefront folders not empty",
                         "These Wavefront folders are not empty:\n\n" + "\n".join(f"• {line}" for line in left) +
                         "\n\nSweep them and generate?", {"sweep": "Sweep and generate"}) is None:
             self.log("not generating: the Wavefront folders must be empty", "warn")
             return False
-        done = self._sweep(script_dir, out_dir)
+        done = self._sweep(script_dir, out_dir, self.mask_dir)
         if done is None:
             return False
         if done.left:                                   # in use, or written again at once: Wavefront still busy
@@ -1031,6 +1127,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.cleanup is not None:
             self._clean_up()
             return
+        if self.storing is not None:
+            self._store_masks()
+            return
         if not self.jobs:
             self.timer.stop()
             return
@@ -1083,11 +1182,30 @@ class MainWindow(QtWidgets.QMainWindow):
             self._send()
             return
         g, self.generation = self.generation, None
+        now = time.time()                               # Wavefront writes a mask's 6 files in the same second
+        self.storing = {"g": g, "at": now + holo.STORE_SETTLE_S, "until": now + holo.STORE_WAIT_S}
+        self.refresh_masks()
+        self._store_masks()
+
+    def _store_masks(self, final: bool = False):
+        """Move the generation's masks from Wavefront's folder into the session's phase mask folder, then write their
+        record there; a file still in use is moved at a later tick, STORE_WAIT_S at most (``final``: now or never)."""
+        s, now = self.storing, time.time()
+        if now < s["at"] and not final:
+            return
+        g = s["g"]
+        names = [holo.mask_name(k + 1) for k in range(len(g["spots_px"]))]
+        _, left = holo.store_masks(self.config.wfd_output_dir, self.mask_dir, names)
+        if left and now < s["until"] and not final:
+            return
+        self.storing = None
         self.timer.stop()
-        out_dir = self.config.wfd_output_dir
-        rec = holo.write_spot_record(out_dir, g["spots_px"], g["spots_um"], g["diameter"], g["cal"])
-        self.log(f"{_n(len(g['spots_px']), 'phase mask')} saved in {out_dir} (spot i = {holo.PREFIX}i, each checked "
-                 f"against its drawn spot; {rec.name})")
+        if left:
+            self.log(f"could not move {_names(left)} into {self.mask_dir} (in use?): they are still in "
+                     f"{self.config.wfd_output_dir}", "error")
+        rec = holo.write_spot_record(self.mask_dir, g["spots_px"], g["spots_um"], g["diameter"], g["cal"])
+        self.log(f"{_n(len(g['spots_px']), 'phase mask')} saved in {self.mask_dir} (spot i = {holo.PREFIX}i, each "
+                 f"checked against its drawn spot; {rec.name})")
         self.refresh_masks()
 
     def _retry(self, problem: str, fix: str):
@@ -1160,18 +1278,18 @@ class MainWindow(QtWidgets.QMainWindow):
 
     # ------------------------------------------------------------------ holo: manual
     def load_selected_mask(self):
-        if not self.combo_mask.currentText():
-            self.log(f"no {holo.PREFIX}<n> mask in {self.config.wfd_output_dir}", "warn")
+        if self.mask_dir is None or not self.combo_mask.currentText():
+            self.log(f"no {holo.PREFIX}<n> mask in the phase mask folder of this session", "warn")
             return
         if self._wavefront_missing(log=True) or not self._purge_scripts():
             return
         n = int(self.combo_mask.currentText())
         name = holo.mask_name(n)
-        self.jobs = [Job("load", name, holo.load_script(holo.mask_png(self.config.wfd_output_dir, name)))]
+        self.jobs = [Job("load", name, holo.load_script(holo.mask_png(self.mask_dir, name)))]
         if not self._send():
             return
         self.log(f"SLM: loading {name}")
-        self.slm_spot = holo.recorded_spot(self.config.wfd_output_dir, n)
+        self.slm_spot = holo.recorded_spot(self.mask_dir, n)
         if self.slm_spot is None:
             self.log(f"{name} is not in an up to date {holo.RECORD_NAME}: its spot cannot be shown on the image",
                      "warn")
@@ -1257,12 +1375,15 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, ev):
         self.feed.live = False                          # its thread waited for at the end
+        self.ask_mask_folder.stop()
         self.wf_timer.stop()
         self.wf_check.stop()
         if self.generation is not None:
             self._abort("window closed", level="warn")
         if self.cleanup is not None:
             self._clean_up(wait=False)                  # the window is closing: sweep now
+        if self.storing is not None:
+            self._store_masks(final=True)               # ... and store the masks of a finished generation now
         if self.shutter.is_open:
             self.close_shutter()
         self.timer.stop()

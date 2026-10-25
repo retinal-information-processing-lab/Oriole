@@ -24,6 +24,8 @@ class Config:
     linked_bin: str = ""           # last bin the spot bin was merged into
     wfd_root: str = r"E:\wfdIV_20261022"    # Wavefront IV install: wfdIV.exe, script\ and GeneratedPhasemasks\
     start_wavefront: bool = True   # Oriole starts Wavefront (in script mode) when it is not running
+    wavefront: str = "IV"          # the Wavefront Oriole drives: "IV" (script folder) or "V" (TCP)
+    experiment_drive: str = "D:\\"  # where the dialog choosing the session's phase mask folder opens
     nidaq_device: str = "Dev1"     # NI-DAQ device driving the shutter (as in Plerion)
     shutter_ao: int = 0            # its analog output channel
     show_slm_field: bool = True    # Wavefront's field (square, no-go zone, power circles) drawn on the image

@@ -49,4 +49,8 @@ def apply_dark_theme(app: QtWidgets.QApplication):
         QComboBox QAbstractItemView { background: #1E1E1E; color: #E0E0E0;
                                       selection-background-color: #2D6A9F; selection-color: #FFFFFF; }
         QToolTip { background: #1E1E1E; color: #E0E0E0; border: 1px solid #333; }
+        QMenuBar { background: #121212; color: #E0E0E0; }
+        QMenuBar::item:selected, QMenu::item:selected { background: #2D6A9F; color: #FFFFFF; }
+        QMenu { background: #1E1E1E; color: #E0E0E0; border: 1px solid #333; }
+        QMenu::item:disabled { color: #555555; }
     """)

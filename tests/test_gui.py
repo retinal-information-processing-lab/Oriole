@@ -59,7 +59,13 @@ def window(qapp, tmp_path, monkeypatch):
     for d in (cfg.wfd_script_dir, cfg.wfd_output_dir):
         os.makedirs(d)
     (tmp_path / "wfd" / "wfdIV.exe").write_bytes(b"")   # a Wavefront install: its folders may be swept
+    experiment = tmp_path / "experiment"                # the session's phase mask folder is made in it
+    experiment.mkdir()
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(experiment)))
+    monkeypatch.setattr("oriole.holo.STORE_SETTLE_S", 0)                 # masks stored as soon as the last is saved
     w = MainWindow(cfg, config_path=tmp_path / "cfg.json")
+    w.ask_mask_folder.stop()                            # what the dialog asked at start gives:
+    w.set_mask_folder(experiment)
     w.daq_log, w.asked, w.answers = daq_log, asked, answers
     w.show()
     yield w
@@ -143,8 +149,9 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert "spot 1 at frames 15/16" in log()
 
     # --- holo: a file in a Wavefront folder turns Generate yellow; Generate then warns, sweeps only on a yes
-    out_dir, script_dir = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir)
-    old = out_dir / "Pattern7_000.algoPhp.png"
+    out_dir, script_dir, masks = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir), w.mask_dir
+    assert masks == tmp_path / "experiment" / "Phasemasks" and masks.is_dir() and w.lbl_output_dir.text() == str(masks)
+    old = masks / "Pattern7_000.algoPhp.png"
     old.write_bytes(b"old")
     t = datetime.datetime(2026, 10, 20, 9).timestamp()
     os.utime(old, (t, t))
@@ -172,8 +179,12 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert w.btn_generate.text() == "■ STOP"          # the folder watcher's refresh keeps STOP
     js2 = _simulate_wavefront(w)
     assert 'setProfileName("Pattern2");' in js2 and "saveProfile(0);" in js2
-    assert w.btn_generate.text() == "GENERATE PHASE MASKS" and "2 phase masks saved" in log()
-    rec = json.loads((out_dir / "Pattern_spots.json").read_text())
+    assert w.btn_generate.text() == "GENERATE PHASE MASKS" and f"2 phase masks saved in {masks}" in log()
+    assert not holo.oriole_files(out_dir)               # moved from Wavefront's folder into the session's
+    assert [p.name for p in holo.oriole_files(masks)] == ["Pattern1_000.algoPhp.png", "Pattern1_000.rawSrc.png",
+                                                          "Pattern2_000.algoPhp.png", "Pattern2_000.rawSrc.png",
+                                                          "Pattern_spots.json"]
+    rec = json.loads((masks / "Pattern_spots.json").read_text())
     assert [m["mask"] for m in rec["masks"]] == ["Pattern1_000.algoPhp.png", "Pattern2_000.algoPhp.png"]
     assert [w.combo_mask.itemText(i) for i in range(w.combo_mask.count())] == ["1", "2"]
     assert "#FFD700" in w.btn_generate.styleSheet()     # the folder now holds masks
@@ -181,7 +192,7 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     # --- manual: pick a mask number and load it; a script Wavefront does not take is erased and sent again
     w.combo_mask.setCurrentText("2")
     w.btn_load_mask.click()
-    escaped = str(out_dir / "Pattern2_000.algoPhp.png").replace("\\", "\\\\")
+    escaped = str(masks / "Pattern2_000.algoPhp.png").replace("\\", "\\\\")
     assert (script_dir / "test.js").read_text().endswith(f'loadProfile("{escaped}", 2);\n')
     monkeypatch.setattr("oriole.holo.NOT_READ_S", 0)
     w.poll()
@@ -208,7 +219,7 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert w.combo_mask.count() == 2 and "Delete the 5 files (2 masks, dated " in w.asked[-1][1]
     w.answers["Sweep the phase mask folder"] = "delete"
     w.btn_sweep_masks.click()
-    assert not any(out_dir.iterdir()) and w.combo_mask.count() == 0 and "#00FF00" in w.btn_generate.styleSheet()
+    assert not any(masks.iterdir()) and w.combo_mask.count() == 0 and "#00FF00" in w.btn_generate.styleSheet()
     assert "phase mask folder swept clean (5 files)" in log()           # 2 masks, their 2 drawn spots, the record
     w.btn_open.click()
     assert w.shutter.is_open and w.daq_log == ["new", 10.0] and "OPEN" in w.lbl_shutter.text()
@@ -452,7 +463,6 @@ def test_cleanup_sweeps_until_the_folders_are_empty(window, monkeypatch):
 def test_loaded_mask_spot_is_ringed(window, monkeypatch):
     w = window
     log = w.log_view.toPlainText
-    out_dir = Path(w.config.wfd_output_dir)
     w.set_image(np.zeros((512, 672), np.float32))
     for x, y in ((100.0, 100.0), (300.0, 200.0)):
         w._on_click(x, y, False)
@@ -469,8 +479,8 @@ def test_loaded_mask_spot_is_ringed(window, monkeypatch):
     assert [tuple(p.pos()) for p in w.view.slm_item.points()] == [(300.0, 200.0)]
 
     # a mask made again since the record (e.g. by DHgui): loaded, but no ring
-    t = (out_dir / "Pattern_spots.json").stat().st_mtime + 60
-    os.utime(out_dir / "Pattern2_000.algoPhp.png", (t, t))
+    t = (w.mask_dir / "Pattern_spots.json").stat().st_mtime + 60
+    os.utime(w.mask_dir / "Pattern2_000.algoPhp.png", (t, t))
     w.btn_load_mask.click()
     assert len(w.view.slm_item.points()) == 0 and "Pattern2 is not in an up to date Pattern_spots.json" in log()
 
@@ -521,8 +531,8 @@ def test_wavefront_field_on_the_image_and_open_folder(window, monkeypatch):
     opened = []
     monkeypatch.setattr(QtGui.QDesktopServices, "openUrl", lambda url: opened.append(url.toLocalFile()))
     w.btn_open_masks.click()
-    assert [Path(p) for p in opened] == [Path(w.config.wfd_output_dir)]
-    w.edit_wfd_root._set(str(Path(w.config.wfd_root) / "missing"))
+    assert [Path(p) for p in opened] == [w.mask_dir]
+    w.mask_dir.rmdir()                                  # the session folder gone meanwhile
     w.btn_open_masks.click()
     assert len(opened) == 1 and "folder not found" in w.log_view.toPlainText().splitlines()[-1]
 
@@ -586,7 +596,8 @@ def test_settings_boxes_apply_and_save(window, tmp_path):
     (other / "script").mkdir(parents=True)
     w.edit_wfd_root._set(str(other))
     assert w.config.wfd_script_dir == str(other / "script") == w.lbl_script_dir.text()
-    assert w.config.wfd_output_dir == str(other / "GeneratedPhasemasks") == w.lbl_output_dir.text()
+    assert w.config.wfd_output_dir == str(other / "GeneratedPhasemasks")
+    assert w.lbl_output_dir.text() == str(w.mask_dir)  # the session's folder, whatever the Wavefront folder
     assert "folder not found: " + str(other / "GeneratedPhasemasks") in w.log_view.toPlainText()
     w.edit_device.setText("Dev2")
     w.edit_device.editingFinished.emit()
@@ -835,17 +846,17 @@ def test_internal_errors_and_unreadable_settings_are_logged(qapp, tmp_path, monk
 def test_brooms_delete_only_wavefront_and_oriole_files(window):
     w = window
     log = w.log_view.toPlainText
-    out_dir, script_dir = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir)
-    notes, readme, sub = out_dir / "notes.txt", script_dir / "readme.txt", out_dir / "kept"
-    for f in (notes, readme):
+    out_dir, script_dir, masks = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir), w.mask_dir
+    notes, mine, readme, sub = masks / "notes.txt", out_dir / "mine.txt", script_dir / "readme.txt", masks / "kept"
+    for f in (notes, mine, readme):
         f.write_text("mine")
     sub.mkdir()
     w.refresh_masks()
     assert "#00FF00" in w.btn_generate.styleSheet()         # not Wavefront's: Generate stays green
-    (out_dir / "Pattern3_000.algoPhp.png").write_bytes(b"png")
+    (masks / "Pattern3_000.algoPhp.png").write_bytes(b"png")
     w.answers["Sweep the phase mask folder"] = "delete"
     w.btn_sweep_masks.click()
-    assert not (out_dir / "Pattern3_000.algoPhp.png").exists() and notes.exists() and sub.is_dir()
+    assert not (masks / "Pattern3_000.algoPhp.png").exists() and notes.exists() and sub.is_dir()
     assert "left alone (not Oriole's or Wavefront's): notes.txt" in log()
     w.btn_sweep_scripts.click()
     assert readme.exists() and "script folder already clean" in log()
@@ -858,17 +869,47 @@ def test_brooms_delete_only_wavefront_and_oriole_files(window):
     w.cleanup["at"] -= holo.ABORT_WAIT_S
     w.poll()
     assert "cleaned up after the abort: both Wavefront folders emptied (2 files: test.js, zdone.js)" in log()
-    assert notes.exists() and readme.exists() and sub.is_dir()
+    assert notes.exists() and mine.exists() and readme.exists() and sub.is_dir()
 
-    # no longer a Wavefront install (no wfdIV.exe): every broom refuses, nothing is deleted, nothing generated
+    # no longer a Wavefront install (no wfdIV.exe): its folders are never swept, nothing generated
     (Path(w.config.wfd_root) / "wfdIV.exe").unlink()
-    mask = out_dir / "Pattern4_000.algoPhp.png"
-    mask.write_bytes(b"png")
-    w.btn_sweep_masks.click()
-    assert (f"refused to sweep: {out_dir} is not in a Wavefront install (no wfdIV.exe next to it); nothing deleted"
-            in log()) and mask.exists()
     (script_dir / "test.js").write_text("stale")
     w.btn_sweep_scripts.click()
     assert f"refused to sweep: {script_dir} is not in a Wavefront install" in log() and (script_dir / "test.js").exists()
     w.generate()
     assert f"not generating: {script_dir} is not in a Wavefront install" in log().splitlines()[-1] and not w.jobs
+
+
+def test_tcp_version_session_phase_mask_folder(qapp, tmp_path, monkeypatch):
+    monkeypatch.setattr("oriole.wavefront.SUPPORTED", False)
+    picked = {"folder": ""}                             # what the folder dialog gives: "" is Cancel
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda parent, title, start: picked.setdefault("start", start) and
+                                     picked["folder"]))
+    cfg = Config(wfd_root=str(tmp_path / "wfd"), start_wavefront=False, experiment_drive=str(tmp_path))
+    w = MainWindow(cfg, config_path=tmp_path / "cfg.json")
+    log = w.log_view.toPlainText
+    assert w.windowTitle() == "Oriole TCP"
+    actions = w.wavefront_actions
+    assert actions["IV"].isChecked() and not actions["V"].isEnabled()           # V: not ready yet
+
+    # asked first thing, the dialog opening on the experiment drive; Cancel: nothing can be generated nor swept
+    QtWidgets.QApplication.processEvents()
+    assert picked["start"] == str(tmp_path) and w.mask_dir is None
+    assert "no phase mask folder for this session" in log() and w.lbl_output_dir.text() == ""
+    assert w.btn_generate.text() == "CHOOSE A PHASE MASK FOLDER"
+    assert not w.btn_sweep_masks.isEnabled() and not w.btn_open_masks.isEnabled()
+    w.set_image(np.zeros((512, 672), np.float32))
+    w._on_click(100.0, 100.0, False)
+    w.generate()                                        # asks again: still Cancel, nothing sent
+    assert w.mask_dir is None and not w.jobs
+
+    # a folder already named Phasemasks is used as it is; its masks are listed
+    existing = tmp_path / "exp2" / "Phasemasks"
+    existing.mkdir(parents=True)
+    (existing / "Pattern3_000.algoPhp.png").write_bytes(b"png")
+    picked["folder"] = str(existing)
+    w.btn_choose_masks.click()
+    assert w.mask_dir == existing and "(already 1 mask there)" in log() and w.combo_mask.currentText() == "3"
+    assert w.btn_sweep_masks.isEnabled() and w.btn_generate.text() == "GENERATE PHASE MASKS"
+    w.close()
