@@ -19,6 +19,7 @@ from oriole.config import Config  # noqa: E402
 from oriole.gui import MainWindow, apply_dark_theme  # noqa: E402
 from oriole import holo, wavefront  # noqa: E402
 from oriole.shutter import ShutterError  # noqa: E402
+from oriole.tcplink import LinkError  # noqa: E402
 from tests.conftest import EXISTING_BIN  # noqa: E402
 from tests.test_camera import wait_for  # noqa: E402
 
@@ -42,6 +43,34 @@ class FakeTask:
         self.log.append("close")
 
 
+class FakeLink:
+    """Wavefront IV's TCP server as Oriole sees it (tcplink.Wavefront4Link): the scripts sent, in order; ``down``: not
+    reachable."""
+    PORT = 59454
+
+    def __init__(self, port_file=None):
+        self.sent, self.down, self.port = [], False, None
+
+    def check(self) -> int:
+        if self.down:
+            raise LinkError(f"Wavefront IV not reachable over TCP (port {self.PORT}): refused")
+        self.port = self.PORT
+        return self.port
+
+    def send(self, js: str):
+        self.check()
+        self.sent.append(js)
+
+    def close(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def fake_link(monkeypatch):
+    """No test reaches the Wavefront of this PC."""
+    monkeypatch.setattr("oriole.tcplink.Wavefront4Link", FakeLink)
+
+
 @pytest.fixture
 def window(qapp, tmp_path, monkeypatch):
     daq_log = []
@@ -56,8 +85,7 @@ def window(qapp, tmp_path, monkeypatch):
     monkeypatch.setattr(MainWindow, "_choose", choose)
     monkeypatch.setattr("oriole.wavefront.SUPPORTED", False)       # the Wavefront of this PC is never touched
     cfg = Config(wfd_root=str(tmp_path / "wfd"), start_wavefront=False)
-    for d in (cfg.wfd_script_dir, cfg.wfd_output_dir):
-        os.makedirs(d)
+    os.makedirs(cfg.wfd_output_dir)
     (tmp_path / "wfd" / "wfdIV.exe").write_bytes(b"")   # a Wavefront install: its folders may be swept
     experiment = tmp_path / "experiment"                # the session's phase mask folder is made in it
     experiment.mkdir()
@@ -79,25 +107,22 @@ def _raw_src(path, x_um, y_um, diameter_um, um_px=0.652, size=576):
 
 
 def _simulate_wavefront(w, drawn_at=None) -> str:
-    """What Wavefront IV does with a dropped script: run it (saving the mask and the spot it drew if asked; the
-    spot elsewhere with ``drawn_at``), remove it."""
-    script = Path(w.config.wfd_script_dir) / "test.js"
-    js = script.read_text()
+    """What Wavefront IV does with the last script sent over TCP: run it (saving the mask and the spot it drew if
+    asked; the spot elsewhere with ``drawn_at``)."""
+    js = w.link.sent[-1]
     m = re.search(r'setProfileName\("(\w+)"\);', js)
     if m and "saveProfile" in js:
         out = Path(w.config.wfd_output_dir)
         x, y, d = map(float, re.search(r"drawSpot\(([-\d.]+),([-\d.]+),([-\d.]+)\);", js).groups())
         _raw_src(out / f"{m.group(1)}_000.rawSrc.png", *(drawn_at or (x, y)), d)
         (out / f"{m.group(1)}_000.algoPhp.png").write_bytes(b"png")
-    script.unlink()
-    (script.parent / "zdone.js").unlink()
     w.poll()
     return js
 
 
 def _generate(w):
     w.generate()
-    assert (Path(w.config.wfd_script_dir) / "test.js").read_text().startswith(holo.EMPTY_LIST + "\n")
+    assert w.link.sent[-1].startswith(holo.EMPTY_LIST + "\n")
 
 
 def test_end_to_end(window, tmp_path, monkeypatch):
@@ -147,8 +172,8 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert read_header(merged)["nb_images"] == 15 + 4 and w.config.linked_bin == str(linked)
     assert "spot 1 at frames 15/16" in log()
 
-    # --- holo: a file in a Wavefront folder turns Generate yellow; Generate then warns, sweeps only on a yes
-    out_dir, script_dir, masks = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir), w.mask_dir
+    # --- holo: a mask in a phase mask folder turns Generate yellow; Generate then warns, sweeps only on a yes
+    out_dir, masks = Path(w.config.wfd_output_dir), w.mask_dir
     assert masks == tmp_path / "experiment" / "Phasemasks" and masks.is_dir() and w.lbl_output_dir.text() == str(masks)
     old = masks / "Pattern7_000.algoPhp.png"
     old.write_bytes(b"old")
@@ -156,18 +181,15 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     os.utime(old, (t, t))
     w.refresh_masks()                                   # the folder watcher does this in the application
     assert "#FFD700" in w.btn_generate.styleSheet() and w.combo_mask.currentText() == "7"
-    w.answers["Wavefront folders not empty"] = None     # Cancel
+    w.answers["Phase mask folders not empty"] = None    # Cancel
     w.generate()
-    assert "phase mask folder: 1 file (1 mask), dated 2026 10 20" in w.asked[-1][1]
-    assert "not generating: the Wavefront folders must be empty" in log() and old.exists() and not w.jobs
-    (script_dir / "test.js").write_text("stale")        # a script Wavefront did not take
-    (script_dir / "zdone.js").write_text("")
-    w.refresh_masks()
-    assert "#FFD700" in w.btn_generate.styleSheet()
-    w.answers["Wavefront folders not empty"] = "sweep"
+    assert "phase mask folder of this session: 1 file (1 mask), dated 2026 10 20" in w.asked[-1][1]
+    assert "not generating: the phase mask folders must be empty" in log() and old.exists() and not w.link.sent
+    (out_dir / "Pattern4_000.algoPhp.png").write_bytes(b"left")     # a mask left in Wavefront's own folder
+    w.answers["Phase mask folders not empty"] = "sweep"
     w.generate()
-    assert "• script folder: test.js, zdone.js (not taken by Wavefront: is auto load on?)" in w.asked[-1][1]
-    assert "Wavefront folders swept (3 files)" in log() and not old.exists()
+    assert "• Wavefront's phase mask folder: 1 file (1 mask), dated " in w.asked[-1][1]
+    assert "phase mask folders swept (2 files)" in log() and not old.exists()
 
     # --- Wavefront first empties its pattern list, then one mask per spot, each checked against its drawn spot
     assert w.btn_generate.text() == "■ STOP" and "#FF6060" in w.btn_generate.styleSheet()
@@ -177,8 +199,9 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert 'setProfileName("Pattern1");' in js1 and "drawSpot(19.4000,5.4000,10.0000);" in js1
     assert w.btn_generate.text() == "■ STOP"          # the folder watcher's refresh keeps STOP
     js2 = _simulate_wavefront(w)
-    assert 'setProfileName("Pattern2");' in js2 and "saveProfile(0);" in js2
+    assert 'setProfileName("Pattern2");' in js2 and "saveProfile(0);" in js2 and len(w.link.sent) == 2
     assert w.btn_generate.text() == "GENERATE PHASE MASKS" and f"2 phase masks saved in {masks}" in log()
+    assert w.wf_runs and w.wf_port == FakeLink.PORT    # masks saved: Wavefront runs the scripts sent over TCP
     assert not holo.oriole_files(out_dir)               # moved from Wavefront's folder into the session's
     assert [p.name for p in holo.oriole_files(masks)] == ["Pattern1_000.algoPhp.png", "Pattern1_000.rawSrc.png",
                                                           "Pattern2_000.algoPhp.png", "Pattern2_000.rawSrc.png",
@@ -188,31 +211,19 @@ def test_end_to_end(window, tmp_path, monkeypatch):
     assert [w.combo_mask.itemText(i) for i in range(w.combo_mask.count())] == ["1", "2"]
     assert "#FFD700" in w.btn_generate.styleSheet()     # the folder now holds masks
 
-    # --- manual: pick a mask number and load it; a script Wavefront does not take is erased and sent again
+    # --- manual: pick a mask number and load it, over TCP; Wavefront not reachable: not loaded, said so
     w.combo_mask.setCurrentText("2")
     w.btn_load_mask.click()
     escaped = str(masks / "Pattern2_000.algoPhp.png").replace("\\", "\\\\")
-    assert (script_dir / "test.js").read_text().endswith(f'loadProfile("{escaped}", 2);\n')
-    monkeypatch.setattr("oriole.holo.NOT_READ_S", 0)
-    w.poll()
-    assert "loading Pattern2 within 0 s (attempt 1/3): script erased, sending it again" in log()
-    assert (script_dir / "test.js").read_text().endswith(f'loadProfile("{escaped}", 2);\n')
-    w.poll()
-    assert "(attempt 2/3): script erased" in log() and w.slm_spot is not None
-    w.poll()
-    assert "(attempt 3/3): Pattern2 not loaded; check that" in log() and "auto load (script folder)" in log()
-    assert not any(script_dir.iterdir()) and not w.jobs and w.slm_spot is None
+    assert w.link.sent[-1] == f'{holo.EMPTY_LIST}\ncleanAllBlob();\nloadProfile("{escaped}", 2);\n'
+    assert log().splitlines()[-1].endswith("SLM: loading Pattern2") and w.slm_spot is not None and not w.jobs
+    w.link.down = True
     w.btn_load_mask.click()
-    (script_dir / "test.js").unlink()                   # taken by Wavefront this time
-    w.poll()
-    assert not w.jobs and (script_dir / "zdone.js").exists()          # nothing erased nor sent again
+    assert f"Pattern2 not loaded: Wavefront IV not reachable over TCP (port {FakeLink.PORT})" in log()
+    assert w.slm_spot is None and w.wf_port is False and len(w.link.sent) == 3
+    w.link.down = False
 
-    # --- brooms: the script folder at once, the mask folder after a yes
-    (script_dir / "test.js").write_text("left behind")
-    w.btn_sweep_scripts.click()
-    assert "script folder swept clean" in log() and not any(script_dir.iterdir())
-    w.btn_sweep_scripts.click()
-    assert "script folder already clean" in log()
+    # --- the mask folder's broom, after a yes
     w.answers["Sweep the phase mask folder"] = None
     w.btn_sweep_masks.click()
     assert w.combo_mask.count() == 2 and "Delete the 5 files (2 masks, dated " in w.asked[-1][1]
@@ -263,76 +274,71 @@ def test_fixed_view_drag_spots_and_help(window):
     assert len(w.dialogs) == 2
 
 
-def _take_without_saving(w):
-    """Wavefront removes the script but never saves the mask."""
-    for name in ("test.js", "zdone.js"):
-        (Path(w.config.wfd_script_dir) / name).unlink()
-    w.poll()
-
-
 def test_mask_not_saved_is_sent_again_then_aborts(window, monkeypatch):
     w = window
     log = w.log_view.toPlainText
-    out_dir, script_dir = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir)
+    out_dir = Path(w.config.wfd_output_dir)
     w.set_image(np.zeros((512, 672), np.float32))
     for x, y in ((100.0, 100.0), (300.0, 200.0)):
         w._on_click(x, y, False)
     _generate(w)
     (out_dir / "Pattern1_000.algoPhp.png").write_bytes(b"")        # an empty file is not a saved mask
     monkeypatch.setattr("oriole.holo.MASK_WAIT_S", -1)
-    _take_without_saving(w)
-    assert ("took the Pattern1 script but did not save Pattern1_000.algoPhp.png within -1 s (attempt 1/3): "
-            "script erased, sending it again") in log()
+    w.poll()
+    assert "did not save Pattern1_000.algoPhp.png within -1 s of its script (attempt 1/3): sending it again" in log()
+    assert len(w.link.sent) == 2 and w.link.sent[1] == w.link.sent[0]
     monkeypatch.setattr("oriole.holo.MASK_WAIT_S", 10.0)
     _simulate_wavefront(w)                                          # saved at the second attempt
     assert "computing Pattern2 (2 of 2)" in log().splitlines()[-1]  # attempts start again for the next mask
     monkeypatch.setattr("oriole.holo.MASK_WAIT_S", -1)
     for k in (1, 2):
-        _take_without_saving(w)
-        assert f"Pattern2_000.algoPhp.png within -1 s (attempt {k}/3): script erased" in log()
-    _take_without_saving(w)
-    assert "Pattern2_000.algoPhp.png within -1 s (attempt 3/3): generation aborted; cleaning up in 2 s" in log()
+        w.poll()
+        assert f"Pattern2_000.algoPhp.png within -1 s of its script (attempt {k}/3): sending it again" in log()
+    w.poll()
+    assert ("Pattern2_000.algoPhp.png within -1 s of its script (attempt 3/3): generation aborted; cleaning up in "
+            "2 s") in log()
+    assert len(w.link.sent) == 5 and w.wf_runs                     # Pattern1 saved: Wavefront runs the scripts
     (out_dir / "Pattern2_000.algoPhp.png").write_bytes(b"png")     # Wavefront was still computing: saved late
     w.cleanup["at"] -= holo.ABORT_WAIT_S                               # 2 s later
     w.poll()
-    assert ("cleaned up after the abort: both Wavefront folders emptied (3 files: Pattern1_000.algoPhp.png, "
-            "Pattern1_000.rawSrc.png, Pattern2_000.algoPhp.png); restart Wavefront IV and generate again") in log()
-    assert not any(out_dir.iterdir()) and not any(script_dir.iterdir()) and not w.jobs
+    assert ("cleaned up after the abort: Wavefront's phase mask folder emptied (3 files: Pattern1_000.algoPhp.png, "
+            'Pattern1_000.rawSrc.png, Pattern2_000.algoPhp.png); tick "Tools → Script engine → Tcp server" in '
+            "Wavefront IV (Wavefront does not remember it), or restart Wavefront IV and generate again") in log()
+    assert not any(out_dir.iterdir()) and not w.jobs
     assert w.btn_generate.text() == "GENERATE PHASE MASKS" and "#00FF00" in w.btn_generate.styleSheet()
 
 
 def test_stop_waits_for_wavefront_then_sweeps(window, monkeypatch):
     w = window
     log = w.log_view.toPlainText
-    out_dir, script_dir = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir)
+    out_dir = Path(w.config.wfd_output_dir)
     w.set_image(np.zeros((512, 672), np.float32))
     for x, y in ((100.0, 100.0), (300.0, 200.0), (400.0, 300.0)):
         w._on_click(x, y, False)
     w.btn_generate.click()
     for _ in range(2):                                              # Pattern1, Pattern2
         _simulate_wavefront(w)
-    assert w.btn_generate.text() == "■ STOP" and (script_dir / "test.js").exists()
+    assert w.btn_generate.text() == "■ STOP" and len(w.link.sent) == 3
     w.btn_generate.click()
     assert "STOP pressed: generation aborted; cleaning up in 2 s, Wavefront may still be computing" in log()
     assert not w.jobs and not w.btn_generate.isEnabled() and not w.btn_load_mask.isEnabled()
     w.poll()
     assert w.btn_generate.text() == "CLEANING UP IN 2 s"
-    assert len(list(out_dir.iterdir())) == 4 and (script_dir / "test.js").exists()    # nothing swept yet
+    assert len(list(out_dir.iterdir())) == 4                    # nothing swept yet
     w.generate()
     w.btn_sweep_masks.click()
     assert "still computing the previous masks" in log() and "not now" in log() and not w.jobs
     w.cleanup["at"] -= holo.ABORT_WAIT_S                               # 2 s later
     w.poll()
-    assert ("cleaned up after the abort: both Wavefront folders emptied (6 files: test.js, zdone.js, "
-            "Pattern1_000.algoPhp.png, Pattern1_000.rawSrc.png, Pattern2_000.algoPhp.png, Pattern2_000.rawSrc.png)"
-            ) in log().splitlines()[-1]
-    assert not any(out_dir.iterdir()) and not any(script_dir.iterdir())
+    assert ("cleaned up after the abort: Wavefront's phase mask folder emptied (4 files: Pattern1_000.algoPhp.png, "
+            "Pattern1_000.rawSrc.png, Pattern2_000.algoPhp.png, Pattern2_000.rawSrc.png)") in log().splitlines()[-1]
+    assert not any(out_dir.iterdir())
     assert w.btn_generate.isEnabled() and w.btn_generate.text() == "GENERATE PHASE MASKS" and w.combo_mask.count() == 0
     w.poll()                                                        # a late tick of the timer does nothing
     w.btn_generate.click()
     assert w.jobs and "computing Pattern1 (1 of 3)" in log().splitlines()[-1]
     w.close()                                                       # closing sweeps at once
-    assert not w.jobs and not any(script_dir.iterdir()) and "cleaned up after the abort" in log().splitlines()[-1]
+    assert not w.jobs and "cleaned up after the abort" in log().splitlines()[-1]
 
 
 def test_mask_holding_another_spot_aborts(window, monkeypatch):
@@ -364,7 +370,6 @@ def test_spots_outside_the_slm_field(window, monkeypatch):
     w = window
     log = w.log_view.toPlainText
     last = lambda: log().splitlines()[-1]                           # noqa: E731
-    script_dir = Path(w.config.wfd_script_dir)
     w.set_image(np.zeros((512, 672), np.float32))
     for x in (336.0, 606.0, 660.0):                                 # in, cut by the field's edge, out
         w._on_click(x, 256.0, False)
@@ -381,7 +386,7 @@ def test_spots_outside_the_slm_field(window, monkeypatch):
                            "right click on a spot removes it; Remove spots removes them all (Undo brings them back) "
                            "and generates the others.",
                            {"remove": "Remove spots and generate", "anyway": "Generate anyway"})
-    assert not w.jobs and not any(script_dir.iterdir()) and len(w.spots) == 3
+    assert not w.jobs and not w.link.sent and len(w.spots) == 3
     assert f"not generating: {off} outside the SLM field (a right click on a spot removes it)" in log()
 
     # Generate anyway: generated, with a big red warning; those masks are not checked
@@ -395,7 +400,7 @@ def test_spots_outside_the_slm_field(window, monkeypatch):
     assert "3 phase masks saved" in last() and "HOLDS NO SPOT" not in log()
 
     # Remove spots and generate: both go (one Undo brings them back), the other one is generated
-    w.answers.update({title: "remove", "Wavefront folders not empty": "sweep"})
+    w.answers.update({title: "remove", "Phase mask folders not empty": "sweep"})
     w.generate()                                                    # (after sweeping the masks just made)
     assert w.spots == [(336.0, 256.0)] and "removed spot 2, spot 3: outside the SLM field (Undo brings them back)" in log()
     assert len(w.jobs) == 1 and "computing Pattern1 (1 of 1)" in last() and log().count("⚠ OUTSIDE") == 1
@@ -441,7 +446,7 @@ def test_cleanup_sweeps_until_the_folders_are_empty(window, monkeypatch):
     w.cleanup["at"] -= 1
     w.poll()
     assert w.cleanup is None and not any(out_dir.iterdir())
-    assert ("cleaned up after the abort (3 sweeps): both Wavefront folders emptied (4 files: test.js, zdone.js, "
+    assert ("cleaned up after the abort (3 sweeps): Wavefront's phase mask folder emptied (2 files: "
             "Pattern1_000.rawSrc.png, Pattern1_000.algoPhp.png)") in log()
 
     # still there after MAX_SWEEPS sweeps: said so
@@ -453,8 +458,9 @@ def test_cleanup_sweeps_until_the_folders_are_empty(window, monkeypatch):
     for _ in range(2):
         w.cleanup["at"] -= 1
         w.poll()
-    assert w.cleanup is None and ("cleanup after the abort incomplete: Pattern1_000.algoPhp.png still in the "
-                                  "Wavefront folders after 2 sweeps: sweep them with the 🧹") in log()
+    assert w.cleanup is None and ("cleanup after the abort incomplete: Pattern1_000.algoPhp.png still in "
+                                  "Wavefront's phase mask folder after 2 sweeps: the next Generate asks to sweep "
+                                  "them") in log()
     assert "#FFD700" in w.btn_generate.styleSheet()
     in_use["n"] = 0
 
@@ -487,9 +493,9 @@ def test_loaded_mask_spot_is_ringed(window, monkeypatch):
     w.combo_mask.setCurrentText("1")
     w.btn_load_mask.click()
     assert [tuple(p.pos()) for p in w.view.slm_item.points()] == [(100.0, 100.0)]
-    w.answers["Wavefront folders not empty"] = "sweep"
+    w.answers["Phase mask folders not empty"] = "sweep"
     w._on_click(200.0, 200.0, False)
-    w.generate()                                        # after sweeping the masks and the load script
+    w.generate()                                        # after sweeping the masks
     assert w.jobs and len(w.view.slm_item.points()) == 0 and not w.view.slm_label.isVisible()
 
 
@@ -592,9 +598,8 @@ def test_settings_boxes_apply_and_save(window, tmp_path):
     w.spin_dmd_px.setValue(2.0)
     assert w.config.dmd_shape == (768, 1024) and w.config.pixel_size_um == 2.0
     other = tmp_path / "wfdIV_other"
-    (other / "script").mkdir(parents=True)
+    other.mkdir()
     w.edit_wfd_root._set(str(other))
-    assert w.config.wfd_script_dir == str(other / "script") == w.lbl_script_dir.text()
     assert w.config.wfd_output_dir == str(other / "GeneratedPhasemasks")
     assert w.lbl_output_dir.text() == str(w.mask_dir)  # the session's folder, whatever the Wavefront folder
     assert "folder not found: " + str(other / "GeneratedPhasemasks") in w.log_view.toPlainText()
@@ -614,25 +619,36 @@ def test_failures_are_logged(window, monkeypatch):
     w.set_image(np.zeros((100, 100), np.float32))
     w._on_click(50.0, 50.0, False)
 
-    # Wavefront never takes the script: erased and sent again (attempt 1/3, 2/3), aborted at 3/3
-    script = Path(w.config.wfd_script_dir) / "test.js"
-    monkeypatch.setattr("oriole.holo.NOT_READ_S", -1)
+    # Wavefront never saves the mask (its Tcp server not ticked): sent again (attempt 1/3, 2/3), aborted at 3/3
+    monkeypatch.setattr("oriole.holo.MASK_WAIT_S", -1)
     w.generate()
     for k in (1, 2):
         w.poll()
-        assert (f"did not take the Pattern1 script within -1 s (attempt {k}/3): script erased, sending it "
-                f"again") in log() and script.exists() and w.btn_generate.text() == "■ STOP"
-    assert "Wavefront: computing Pattern1 (1 of 1, attempt 3/3)" in log()
+        assert (f"did not save Pattern1_000.algoPhp.png within -1 s of its script (attempt {k}/3): sending it "
+                f"again") in log() and w.btn_generate.text() == "■ STOP"
+    assert "Wavefront: computing Pattern1 (1 of 1, attempt 3/3)" in log() and len(w.link.sent) == 3
     w.poll()
     assert "(attempt 3/3): generation aborted; cleaning up in 2 s" in log() and not w.jobs
-    assert not script.exists()                          # never taken: erased at once, as at 1/3 and 2/3
+    assert w.wf_runs is False                           # no mask saved since it started: it does not run them
     w.cleanup["at"] -= holo.ABORT_WAIT_S                   # 2 s later
     w.poll()
-    assert "cleaned up after the abort: both Wavefront folders emptied (0 files); check that" in log()
-    assert "auto load (script folder)" in log() and not any(script.parent.iterdir())
+    assert ("cleaned up after the abort: Wavefront's phase mask folder emptied (0 files); tick \"Tools → Script "
+            "engine → Tcp server\" in Wavefront IV") in log()
     assert w.btn_generate.isEnabled() and w.btn_generate.text() == "GENERATE PHASE MASKS"
     w.generate()                                        # ready to generate again
     assert w.jobs and w.btn_generate.text() == "■ STOP"
+    w.stop_generation()
+    w.cleanup["at"] -= holo.ABORT_WAIT_S
+    w.poll()
+
+    # Wavefront not reachable: the generation is aborted at once
+    w.link.down = True
+    w.generate()
+    assert ("cannot send the Pattern1 script: Wavefront IV not reachable over TCP (port 59454): refused: generation "
+            "aborted") in log() and not w.jobs and w.wf_port is False and len(w.link.sent) == 4
+    w.cleanup["at"] -= holo.ABORT_WAIT_S
+    w.poll()
+    assert "restart Wavefront IV and generate again" in log().splitlines()[-1]
 
     # no NI-DAQ: the error is logged and the shutter stays closed
     def no_daq(device, ao):
@@ -655,39 +671,47 @@ def test_wavefront_started_checked_and_watched(window, tmp_path, monkeypatch):
     w._watch_wavefront()
     assert w.lbl_wavefront.text() == "Wavefront: not running" and w.btn_wavefront.text() == "Start"
 
-    # Start: its program missing (licence); then there: its settings made for script mode, then started
+    # Start: its program missing (licence); then there: where it saves its masks set (the script folder setting, for
+    # Plerion and Oriole's script version, left as it is), then started
     w.btn_wavefront.click()
     assert f"cannot start Wavefront IV: wfdIVCore.dll is missing or empty in {root}" in log() and not started
     (root / "wfdIVCore.dll").write_bytes(b"x")
     w.btn_wavefront.click()
-    assert started == [root] and "set in wfdIV.ini: scriptEngine/autoload, mainSettings/rootPath" in log()
-    assert wavefront.read_ini("scriptEngine", "autoload", ini) == "true"
+    assert started == [root] and ('set in wfdIV.ini: mainSettings/rootPath; then tick "Tools → Script engine → Tcp '
+                                  'server" in Wavefront IV') in log()
+    assert wavefront.read_ini("scriptEngine", "autoload", ini) is None
     assert w.lbl_wavefront.text() == "Wavefront: starting…" and not w.btn_wavefront.isEnabled()
 
-    # ready (its window open): checked 2 s later with a script that does nothing
+    # ready (its window open): its TCP server checked 2 s later; scripts run only once Tcp server is ticked
     procs.update(launcher=(1, root), core=(2, root))
     w._watch_wavefront()
     assert w.lbl_wavefront.text() == "Wavefront: running" and w.btn_wavefront.text() == "Check"
     assert w.wf_check.isActive() and "saves its masks in" not in log()
     w.wf_check.stop()
-    w._check_when_idle()                                # what the 2 s timer does
-    script = Path(w.config.wfd_script_dir) / "test.js"
-    assert script.read_text() == holo.CHECK_SCRIPT and w.btn_generate.text() == "GENERATE PHASE MASKS"
-    assert "#00FF00" in w.btn_generate.styleSheet()     # Oriole's own script: not a reason to turn yellow
-    _simulate_wavefront(w)
-    assert "takes scripts: script mode ✓" in log() and w.lbl_wavefront.text() == "Wavefront: script mode ✓"
+    w._first_check()                                    # what the 2 s timer does
+    assert "Wavefront IV's TCP server reached (port 59454); it runs the scripts only with Tcp server ticked" in log()
+    assert w.lbl_wavefront.text() == "Wavefront: TCP port 59454 (Tcp server ticked?)" and not w.link.sent
+    w.set_image(np.zeros((512, 672), np.float32))
+    w._on_click(336.0, 256.0, False)
+    _generate(w)
+    _simulate_wavefront(w)                              # a mask saved: it runs them
+    assert w.lbl_wavefront.text() == "Wavefront: TCP ✓ (port 59454)"
+    w.btn_wavefront.click()                             # Check
+    assert log().splitlines()[-1].endswith("reached (port 59454); it runs the scripts ✓")
 
-    # Check again, not taken: not in script mode
-    monkeypatch.setattr("oriole.holo.NOT_READ_S", -1)
+    # its server not reachable (e.g. its port file stale): said in red, until it is again
+    w.link.down = True
     w.btn_wavefront.click()
-    w.poll()
-    assert "did not take the check script within -1 s: Wavefront IV is not in script mode; check that" in log()
-    assert w.lbl_wavefront.text() == "Wavefront: NOT in script mode" and not any(script.parent.iterdir())
+    assert "Wavefront IV not reachable over TCP (port 59454)" in log().splitlines()[-1]
+    assert w.lbl_wavefront.text() == "Wavefront: TCP server not reachable"
+    w.link.down = False
+    w.btn_wavefront.click()
+    assert w.lbl_wavefront.text() == "Wavefront: TCP ✓ (port 59454)"
 
-    # closed: Generate and Load say so at once
+    # closed: forgotten (its next start has another port); Generate and Load say so at once
     procs.clear()
     w._watch_wavefront()
-    w.set_image(np.zeros((512, 672), np.float32))
+    assert w.wf_port is None and w.wf_runs is None and w.lbl_wavefront.text() == "Wavefront: not running"
     w._on_click(100.0, 100.0, False)
     w.generate()
     assert "Wavefront IV is not running: press Start" in log().splitlines()[-1] and not w.jobs
@@ -845,9 +869,9 @@ def test_internal_errors_and_unreadable_settings_are_logged(qapp, tmp_path, monk
 def test_brooms_delete_only_wavefront_and_oriole_files(window):
     w = window
     log = w.log_view.toPlainText
-    out_dir, script_dir, masks = Path(w.config.wfd_output_dir), Path(w.config.wfd_script_dir), w.mask_dir
-    notes, mine, readme, sub = masks / "notes.txt", out_dir / "mine.txt", script_dir / "readme.txt", masks / "kept"
-    for f in (notes, mine, readme):
+    out_dir, masks = Path(w.config.wfd_output_dir), w.mask_dir
+    notes, mine, sub = masks / "notes.txt", out_dir / "mine.txt", masks / "kept"
+    for f in (notes, mine):
         f.write_text("mine")
     sub.mkdir()
     w.refresh_masks()
@@ -857,26 +881,24 @@ def test_brooms_delete_only_wavefront_and_oriole_files(window):
     w.btn_sweep_masks.click()
     assert not (masks / "Pattern3_000.algoPhp.png").exists() and notes.exists() and sub.is_dir()
     assert "left alone (not Oriole's or Wavefront's): notes.txt" in log()
-    w.btn_sweep_scripts.click()
-    assert readme.exists() and "script folder already clean" in log()
 
     # a generation stopped: its cleanup leaves them too
     w.set_image(np.zeros((512, 672), np.float32))
     w._on_click(100.0, 100.0, False)
     w.generate()                                            # nothing of Wavefront's left: no question asked
+    (out_dir / "Pattern1_000.algoPhp.png").write_bytes(b"png")
     w.btn_generate.click()                                  # STOP
     w.cleanup["at"] -= holo.ABORT_WAIT_S
     w.poll()
-    assert "cleaned up after the abort: both Wavefront folders emptied (2 files: test.js, zdone.js)" in log()
-    assert notes.exists() and mine.exists() and readme.exists() and sub.is_dir()
+    assert ("cleaned up after the abort: Wavefront's phase mask folder emptied (1 file: Pattern1_000.algoPhp.png)"
+            in log()) and "left alone (not Oriole's or Wavefront's): mine.txt" in log()
+    assert notes.exists() and mine.exists() and sub.is_dir()
 
-    # no longer a Wavefront install (no wfdIV.exe): its folders are never swept, nothing generated
+    # no longer a Wavefront install (no wfdIV.exe): its folder is never swept, nothing generated
     (Path(w.config.wfd_root) / "wfdIV.exe").unlink()
-    (script_dir / "test.js").write_text("stale")
-    w.btn_sweep_scripts.click()
-    assert f"refused to sweep: {script_dir} is not in a Wavefront install" in log() and (script_dir / "test.js").exists()
     w.generate()
-    assert f"not generating: {script_dir} is not in a Wavefront install" in log().splitlines()[-1] and not w.jobs
+    assert f"not generating: {out_dir} is not in a Wavefront install" in log().splitlines()[-1] and not w.jobs
+    assert len(w.link.sent) == 1
 
 
 def test_tcp_version_session_phase_mask_folder(qapp, tmp_path, monkeypatch):
@@ -886,14 +908,14 @@ def test_tcp_version_session_phase_mask_folder(qapp, tmp_path, monkeypatch):
                         staticmethod(lambda parent, title, start: picked.setdefault("start", start) and
                                      picked["folder"]))
     cfg = Config(wfd_root=str(tmp_path / "wfd"), start_wavefront=False, experiment_drive=str(tmp_path))
-    for d in (cfg.wfd_script_dir, cfg.wfd_output_dir):
-        os.makedirs(d)
+    os.makedirs(cfg.wfd_output_dir)
     (tmp_path / "wfd" / "wfdIV.exe").write_bytes(b"")
     w = MainWindow(cfg, config_path=tmp_path / "cfg.json")
     log = w.log_view.toPlainText
     assert w.windowTitle() == "Oriole TCP"
     actions = w.wavefront_actions
     assert actions["IV"].isChecked() and not actions["V"].isEnabled()           # V: not ready yet
+    assert actions["IV"].text() == "Wavefront IV (TCP)" and not hasattr(w, "btn_sweep_scripts")    # no script folder
 
     # nothing asked when Oriole opens; Generate green, the folder's broom and 📂 off until it is chosen
     QtWidgets.QApplication.processEvents()

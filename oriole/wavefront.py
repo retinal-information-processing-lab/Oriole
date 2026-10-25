@@ -1,4 +1,4 @@
-"""Wavefront IV as a program (Windows): started from its install folder, in script mode, found among the processes.
+"""Wavefront IV as a program (Windows): started from its install folder, found among the processes.
 
 An install is a copy of Wavefront's zip in a folder of its own (E:\\wfdIV_<date>): its ``wfdIV.exe`` is a launcher
 that runs the program itself, ``wfdIVCore.dll`` (also the process name). Its licence expires now and then: the core
@@ -6,9 +6,10 @@ then fails to start, or is left empty, and Wavefront is installed again in a new
 Errorcode 7536725.pdf" on the desktop).
 
 Every install shares the settings in %APPDATA%\\wfdIV\\wfdIV.ini (a QSettings ini file), read when Wavefront starts
-and written when it starts and exits. As tried on the rig, ``[scriptEngine] autoload`` there is the script mode
-(Tools → Script engine → auto load (script folder)) Wavefront starts in, and ``[mainSettings] rootPath`` the folder it
-saves the masks in: both are set before Oriole starts it. Closing Wavefront asks to confirm: Oriole never does.
+and written when it starts and exits. As tried on the rig, ``[mainSettings] rootPath`` there is the folder it saves
+the masks in: set before Oriole starts it. Its script source (Tools → Script engine) is not set: Oriole TCP needs "Tcp
+server", which Wavefront does not remember (ticked by hand); ``[scriptEngine] autoload`` (the script folder, for
+Plerion and Oriole's script version) is left as it is. Closing Wavefront asks to confirm: Oriole never does.
 """
 from __future__ import annotations
 
@@ -19,12 +20,12 @@ from pathlib import Path
 
 LAUNCHER = "wfdIV.exe"
 CORE = "wfdIVCore.dll"
-WINDOW_TITLE = "Wavefront Designer IV"      # its main window, open once it is ready for scripts
+WINDOW_TITLE = "Wavefront Designer IV"      # its main window, open once it is ready
 INI_PATH = Path(os.environ.get("APPDATA", Path.home())) / "wfdIV" / "wfdIV.ini"
 INSTALL_ZIP = Path.home() / "Documents" / "wfdIV.ifta2D-181220.00.zip"         # what an install is made from
 LICENCE_PDF = Path.home() / "Desktop" / "Wavefront IV Errorcode 7536725.pdf"   # the lab's reinstall procedure
 LICENCE_HELP = 'the licence expired? Its fix is in "Wavefront IV Errorcode 7536725.pdf" on the desktop'
-FOLDERS = ("script", "GeneratedPhasemasks")     # made by hand in a new install: the zip has neither
+FOLDERS = ("GeneratedPhasemasks",)          # made by hand in a new install: the zip has none
 SUPPORTED = sys.platform == "win32"
 
 
@@ -124,9 +125,8 @@ def write_ini(values: dict[tuple[str, str], str], path=None) -> list[str]:
 
 
 def prepare(folder, path=None) -> list[str]:
-    """Before starting Wavefront from ``folder``: script mode on, masks saved in its GeneratedPhasemasks folder."""
-    return write_ini({("scriptEngine", "autoload"): "true",
-                      ("mainSettings", "rootPath"): str(Path(folder) / "GeneratedPhasemasks")}, path)
+    """Before starting Wavefront from ``folder``: masks saved in its GeneratedPhasemasks folder."""
+    return write_ini({("mainSettings", "rootPath"): str(Path(folder) / "GeneratedPhasemasks")}, path)
 
 
 # ----------------------------------------------------------------------------- running processes
@@ -176,7 +176,7 @@ def _process_folder(k32, pid: int) -> Path | None:
 
 
 def window_open(pid: int) -> bool:
-    """The process ``pid`` shows Wavefront's main window: started, ready for scripts."""
+    """The process ``pid`` shows Wavefront's main window: started, ready."""
     if not SUPPORTED:
         return False
     import ctypes

@@ -1,8 +1,7 @@
-"""Holographic (SLM) stimulation through Wavefront IV, driven by file drop as DHgui and Plerion do.
+"""Holographic (SLM) stimulation through Wavefront IV: its scripts (sent over TCP, tcplink), its mask files.
 
-Wavefront watches its ``script`` folder (script auto-load on): a ``test.js`` followed by an empty
-``zdone.js`` makes it run the script, then the files are removed. One phase mask is computed and
-saved per spot (DHgui GeneratePhaseMasks); a saved mask is shown with Plerion's loadProfile script.
+One phase mask is computed and saved per spot (DHgui GeneratePhaseMasks); a saved mask is shown with Plerion's
+loadProfile script.
 """
 from __future__ import annotations
 
@@ -19,15 +18,12 @@ import numpy as np
 from .calibration import Calibration
 from .images import load_gray
 
-SCRIPT_NAME = "test.js"
-TRIGGER_NAME = "zdone.js"
 PREFIX = "Pattern"                   # DHgui names the mask of spot n Pattern<n> (what Plerion counts)
 MASK_SUFFIX = "_000.algoPhp.png"     # Wavefront saves profile <name> as <name>_000.algoPhp.png (+ siblings)
 SRC_SUFFIX = "_000.rawSrc.png"       # ... and the pattern it drew for it as <name>_000.rawSrc.png
 RECORD_NAME = f"{PREFIX}_spots.json"
 LIST_IDS = 500                       # pattern IDs 0..LIST_IDS deleted to empty Wavefront's list (0.7 ms each)
-NOT_READ_S = 10.0                    # a script still there after this long was not taken: erased, sent again
-MASK_WAIT_S = 10.0                  # a script taken but its mask still not saved after this long: sent again
+MASK_WAIT_S = 10.0                  # a mask still not saved this long after its script was sent: sent again
 MAX_ATTEMPTS = 3                     # sends of the same script before giving up
 # Wavefront's field as it draws it, in µm around its (0, 0) (measured on its display, rig wfdIV_20261022): its
 # 576 px canvas, a square; its diffraction efficiency circles, by %; a cross at the centre
@@ -62,9 +58,6 @@ def mask_script(profile: str, x_um: float, y_um: float, diameter_um: float) -> s
              "do { curDate = new Date(); }", "while(curDate-date < 1000);",
              "saveProfile(0);", "deleteProfile(0);"]
     return "\n".join(lines) + "\n"
-
-
-CHECK_SCRIPT = "// Oriole: is Wavefront in script mode? (this script does nothing)\n"   # taken: it is
 
 
 def load_script(png_path) -> str:
@@ -120,21 +113,20 @@ class UnsafeSweep(RuntimeError):
 # The only folders a sweep may touch, by name, and the only files it may delete there: what Wavefront and Oriole
 # write. Wavefront's own folders must lie in its install; Phasemasks is the session folder Oriole made.
 MASK_FILES = re.compile(rf"^({PREFIX}\d+_000\.[\w.]+|{re.escape(RECORD_NAME)})$")
-SWEEPABLE = {"generatedphasemasks": (MASK_FILES, True), "script": (re.compile(r"^[^.][^\\/]*\.js(\.part)?$"), True),
-             "phasemasks": (MASK_FILES, False)}
+SWEEPABLE = {"generatedphasemasks": (MASK_FILES, True), "phasemasks": (MASK_FILES, False)}
 SESSION_FOLDER = "Phasemasks"       # made inside the folder chosen for the experiment: the masks of the session
 INSTALL_MARK = "wfdIV.exe"          # Wavefront's folders lie in its install, next to its launcher
 
 
 def sweep_rule(folder) -> re.Pattern:
-    """The files a sweep may delete in ``folder``. UnsafeSweep unless ``folder`` is an existing script or
-    GeneratedPhasemasks folder of a Wavefront install, or a Phasemasks folder, and not a drive root nor a link."""
+    """The files a sweep may delete in ``folder``. UnsafeSweep unless ``folder`` is an existing GeneratedPhasemasks
+    folder of a Wavefront install, or a Phasemasks folder, and not a drive root nor a link."""
     p = Path(folder)
     rule, in_install = SWEEPABLE.get(p.name.lower(), (None, False))
     if not p.is_dir():
         raise UnsafeSweep(f"{p} is not an existing folder")
     if rule is None:
-        raise UnsafeSweep(f"{p} is not a script, GeneratedPhasemasks or {SESSION_FOLDER} folder")
+        raise UnsafeSweep(f"{p} is not a GeneratedPhasemasks or {SESSION_FOLDER} folder")
     if os.path.ismount(p) or p.parent == p:
         raise UnsafeSweep(f"{p} is a drive root")
     if p.is_symlink() or getattr(os.path, "isjunction", lambda _: False)(p):
@@ -270,22 +262,3 @@ def recorded_spot(output_dir, n: int) -> dict | None:
     except (OSError, ValueError, KeyError, TypeError, StopIteration):
         return None
 
-
-# ----------------------------------------------------------------------------- script folder
-def script_pending(script_dir) -> bool:
-    """A script is waiting in the folder: Wavefront has not taken it yet."""
-    return (Path(script_dir) / SCRIPT_NAME).exists()
-
-
-def send_script(script_dir, js: str):
-    """Drop ``js`` as test.js, then the empty zdone.js that makes Wavefront run it."""
-    script_dir = Path(script_dir)
-    if not script_dir.is_dir():
-        raise FileNotFoundError(f"Wavefront script folder not found: {script_dir}")
-    if script_pending(script_dir):
-        raise RuntimeError(f"{script_dir / SCRIPT_NAME} is still pending: is Wavefront IV running with script "
-                           f"auto-load on?")
-    part = script_dir / (SCRIPT_NAME + ".part")
-    part.write_text(js)                 # written whole then renamed: Wavefront never reads half a script
-    os.replace(part, script_dir / SCRIPT_NAME)
-    (script_dir / TRIGGER_NAME).write_text("")

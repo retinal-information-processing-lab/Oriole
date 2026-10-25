@@ -22,9 +22,9 @@ class Config:
     holo_cal: dict = field(default_factory=HOLO_DEFAULT.to_dict)       # camera -> Wavefront µm
     last_dir: str = ""             # last directory used in file dialogs
     linked_bin: str = ""           # last bin the spot bin was merged into
-    wfd_root: str = r"E:\wfdIV_20261022"    # Wavefront IV install: wfdIV.exe, script\ and GeneratedPhasemasks\
-    start_wavefront: bool = True   # Oriole starts Wavefront (in script mode) when it is not running
-    wavefront: str = "IV"          # the Wavefront Oriole drives: "IV" (script folder) or "V" (TCP)
+    wfd_root: str = r"E:\wfdIV_20261022"    # Wavefront IV install: wfdIV.exe and GeneratedPhasemasks\
+    start_wavefront: bool = True   # Oriole starts Wavefront when it is not running
+    wavefront: str = "IV"          # the Wavefront Oriole drives over TCP: "IV" or "V" (not ready yet)
     experiment_drive: str = "D:\\"  # where the dialog choosing the session's phase mask folder opens
     nidaq_device: str = "Dev1"     # NI-DAQ device driving the shutter (as in Plerion)
     shutter_ao: int = 0            # its analog output channel
@@ -43,11 +43,6 @@ class Config:
     @property
     def holo(self) -> Calibration:
         return Calibration.from_dict(self.holo_cal, HOLO_DEFAULT)
-
-    @property
-    def wfd_script_dir(self) -> str:
-        """Folder Wavefront watches for scripts."""
-        return str(Path(self.wfd_root) / "script")
 
     @property
     def wfd_output_dir(self) -> str:

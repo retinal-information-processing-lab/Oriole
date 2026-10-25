@@ -30,14 +30,14 @@ def test_install_problems_and_other_installs(tmp_path):
     assert "wfdIVCore.dll is missing or empty" in install_problem(expired)
     assert "Wavefront IV Errorcode 7536725.pdf" in install_problem(expired)
     assert install_problem(bare) == f"no wfdIV.exe in {bare}"
-    fresh = tmp_path / "wfdIV_fresh"                    # just extracted from the zip: no script, no mask folder
+    assert other_installs(expired) == [good] and other_installs(good) == []
+    fresh = tmp_path / "wfdIV_fresh"                    # just extracted from the zip: no mask folder
     fresh.mkdir()
     (fresh / "wfdIV.exe").write_bytes(b"launcher")
     (fresh / "wfdIVCore.dll").write_bytes(b"core")
-    assert install_problem(fresh) == f"no script or GeneratedPhasemasks folder in {fresh}: make them"
-    (fresh / "script").mkdir()
     assert install_problem(fresh) == f"no GeneratedPhasemasks folder in {fresh}: make it"
-    assert other_installs(expired) == [good] and other_installs(good) == []
+    (fresh / "GeneratedPhasemasks").mkdir()
+    assert install_problem(fresh) is None               # Oriole TCP needs no script folder
 
 
 def test_settings_written_as_qsettings_every_other_line_kept(tmp_path):
@@ -45,9 +45,8 @@ def test_settings_written_as_qsettings_every_other_line_kept(tmp_path):
     ini.write_bytes(QT_INI.encode("latin-1"))
     assert read_ini("mainSettings", "rootPath", ini) == r"E:\wfdIV_20241023\GeneratedPhasemasks"
     assert read_ini("scriptEngine", "autoload", ini) == "false" and read_ini("nope", "x", ini) is None
-    assert prepare(r"E:\wfdIV_20261022", ini) == ["scriptEngine/autoload", "mainSettings/rootPath"]
-    assert ini.read_bytes().decode("latin-1") == QT_INI.replace("autoload=false", "autoload=true").replace(
-        "20241023", "20261022")
+    assert prepare(r"E:\wfdIV_20261022", ini) == ["mainSettings/rootPath"]      # the script source left alone
+    assert ini.read_bytes().decode("latin-1") == QT_INI.replace("20241023", "20261022")
     before = ini.read_bytes()
     assert prepare(r"E:\wfdIV_20261022", ini) == [] and ini.read_bytes() == before     # nothing to change
     # a key or a section missing: added (a value with a comma is quoted, as QSettings does)
@@ -58,8 +57,8 @@ def test_settings_written_as_qsettings_every_other_line_kept(tmp_path):
     assert text.endswith('\r\n\r\n[new]\r\nk="a, \\"b\\""\r\n') and read_ini("new", "k", ini) == 'a, "b"'
     # no settings yet (Wavefront never started on this PC): made
     fresh = tmp_path / "fresh" / "wfdIV.ini"
-    assert prepare(tmp_path / "wfd", fresh) == ["scriptEngine/autoload", "mainSettings/rootPath"]
-    assert read_ini("scriptEngine", "autoload", fresh) == "true"
+    assert prepare(tmp_path / "wfd", fresh) == ["mainSettings/rootPath"]
+    assert read_ini("scriptEngine", "autoload", fresh) is None
     assert Path(read_ini("mainSettings", "rootPath", fresh)) == tmp_path / "wfd" / "GeneratedPhasemasks"
 
 
